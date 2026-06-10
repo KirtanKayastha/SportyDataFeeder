@@ -14,7 +14,7 @@ router = APIRouter()
 @router.post("/imports/nba")
 def run_nba_import(payload: ImportNBARequest, db=Depends(get_db)):
     try:
-        result = import_nba(db, Path(payload.csv_path))
+        result = import_nba(db, Path(payload.csv_path), gameweek=payload.gameweek, season=payload.season)
         return {"status": "ok", "result": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -25,7 +25,12 @@ def run_nba_import(payload: ImportNBARequest, db=Depends(get_db)):
 @router.post("/imports/premier-league")
 def run_premier_league_import(payload: ImportPremierLeagueRequest, db=Depends(get_db)):
     try:
-        result = import_premier_league(db, [Path(csv_path) for csv_path in payload.csv_paths])
+        result = import_premier_league(
+            db,
+            [Path(csv_path) for csv_path in payload.csv_paths],
+            gameweek=payload.gameweek,
+            season=payload.season,
+        )
         return {"status": "ok", "result": result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

@@ -7,6 +7,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database import Event, Match, Player, Sport, Team, get_db
 from app.schemas import MatchCreate, MatchDetailRead, MatchRead
+from app.services.scoring_rules import score_events
+from app.services.sport_resolver import SportType, resolve_sport_type
 
 router = APIRouter()
 
@@ -17,8 +19,10 @@ def _not_found(entity: str, entity_id: int):
 
 def _score_match(db, match: Match) -> tuple[int, int]:
     sport = db.query(Sport).filter_by(id=match.sport_id).first()
-    sport_name = sport.name if sport else ""
-    is_basketball = "basket" in sport_name.lower()
+    sport_type = resolve_sport_type(sport.name if sport else None)
+    if sport_type is SportType.UNKNOWN:
+        # Pre-resolver behaviour: anything that is not basketball scored as football.
+        sport_type = SportType.FOOTBALL
 
     events = (
         db.query(Event)
@@ -30,37 +34,25 @@ def _score_match(db, match: Match) -> tuple[int, int]:
         player.id: player.team_id
         for player in db.query(Player).filter(Player.sport_id == match.sport_id).all()
     }
+    match_team_ids = {match.home_team_id, match.away_team_id}
 
-    home_score = 0
-    away_score = 0
+    scorable_events = []
     for event in events:
         if event.player_id is None:
             continue
         event_team_id = player_team_map.get(event.player_id)
-        if event_team_id not in {match.home_team_id, match.away_team_id}:
+        if event_team_id not in match_team_ids:
             continue
+        extra_data = None
+        if event.extra:
+            try:
+                extra_data = json.loads(event.extra)
+            except json.JSONDecodeError:
+                extra_data = None
+        scorable_events.append({"event_type": event.event_type, "team_id": event_team_id, "extra": extra_data})
 
-        if is_basketball and event.event_type in {"point_2", "point_3", "free_throw"}:
-            extra_data = {}
-            if event.extra:
-                try:
-                    extra_data = json.loads(event.extra)
-                except json.JSONDecodeError:
-                    extra_data = {}
-            points = extra_data.get("points")
-            if points is None:
-                points = {"point_2": 2, "point_3": 3, "free_throw": 1}.get(event.event_type, 0)
-            if event_team_id == match.home_team_id:
-                home_score += int(points or 0)
-            else:
-                away_score += int(points or 0)
-        elif not is_basketball and event.event_type == "goal":
-            if event_team_id == match.home_team_id:
-                home_score += 1
-            else:
-                away_score += 1
-
-    return home_score, away_score
+    scores = score_events(scorable_events, sport_type)
+    return scores.get(match.home_team_id, 0), scores.get(match.away_team_id, 0)
 
 
 @router.get("", response_model=list[MatchRead])

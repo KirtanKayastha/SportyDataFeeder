@@ -1,25 +1,22 @@
 # /home/sam069/projects/SportyDataFeeder/alembic/env.py
 
-import os
 from logging.config import fileConfig
-
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from app.config import get_settings
 from app.database import Base
 
 config = context.config
-database_url = os.getenv("DATABASE_URL")
 
-if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+# Default to the app's configured database; an explicitly provided
+# sqlalchemy.url (e.g. from tests) takes precedence.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Import models so Alembic can see metadata.
 # noqa: F401

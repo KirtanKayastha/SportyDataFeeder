@@ -2,13 +2,18 @@
 
 import csv
 import io
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.database import Player, Sport, Team
+from app.database import Player, PlayerStat, Sport, Team
 
 BATCH_SIZE = 500
 PROGRESS_EVERY = 100
+
+GAMEWEEK_PATTERN = re.compile(r"(\d+)\s*(?:st|nd|rd|th)?\s*gameday", re.IGNORECASE)
+SEASON_PATTERN = re.compile(r"season\s*(\d{4}(?:-\d{2,4})?)", re.IGNORECASE)
+YEAR_PATTERN = re.compile(r"(\d{4})")
 
 
 def normalize_text(value: Any, default: str | None = None) -> str | None:
@@ -21,6 +26,50 @@ def normalize_text(value: Any, default: str | None = None) -> str | None:
 def get_row_value(row: dict, key: str, default: str | None = None) -> str | None:
     lower_map = {str(k).strip().lower(): v for k, v in row.items()}
     return lower_map.get(key.lower(), default)
+
+
+def parse_int(value: Any) -> int | None:
+    text = normalize_text(value, None)
+    if text is None:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def parse_float(value: Any) -> float | None:
+    text = normalize_text(value, None)
+    if text is None:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def infer_gameweek_and_season(csv_path: Path) -> tuple[int, str]:
+    """Best-effort gameweek/season from a stats CSV filename.
+
+    Files like ``...until31thGameDayOnSeason2025-26.csv`` yield (31, "2025-26").
+    Season-total files without a gameweek (e.g. ``nba_player_stats_2026.csv``)
+    yield gameweek 0 — "season to date".
+    """
+    stem = csv_path.stem
+    gameweek_match = GAMEWEEK_PATTERN.search(stem)
+    gameweek = int(gameweek_match.group(1)) if gameweek_match else 0
+
+    season_match = SEASON_PATTERN.search(stem)
+    if season_match:
+        season = season_match.group(1)
+    else:
+        year_match = YEAR_PATTERN.search(stem)
+        season = year_match.group(1) if year_match else "unknown"
+    return gameweek, season
+
+
+def load_stat_key_cache(db) -> set[tuple[int, int, str]]:
+    return set(db.query(PlayerStat.player_id, PlayerStat.gameweek, PlayerStat.season).all())
 
 
 def load_csv_rows(csv_path: Path) -> Iterable[dict]:
@@ -67,11 +116,11 @@ def load_team_cache(db, sport_id: int):
     return {normalize_text(team.name, ""): team for team in teams if normalize_text(team.name, "")}
 
 
-def load_player_key_cache(db, sport_id: int):
-    existing_players = db.query(Player.name, Player.team_id).filter(Player.sport_id == sport_id).all()
+def load_player_key_cache(db, sport_id: int) -> dict[tuple[str, int], int]:
+    existing_players = db.query(Player.name, Player.team_id, Player.id).filter(Player.sport_id == sport_id).all()
     return {
-        (normalize_text(name, ""), team_id)
-        for name, team_id in existing_players
+        (normalize_text(name, ""), team_id): player_id
+        for name, team_id, player_id in existing_players
         if normalize_text(name, "")
     }
 
@@ -102,10 +151,14 @@ def get_or_create_team(db, team_cache, sport_id: int, team_name: str):
     return new_team, True
 
 
-def import_nba(db, csv_path):
+def import_nba(db, csv_path, gameweek: int | None = None, season: str | None = None):
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    inferred_gameweek, inferred_season = infer_gameweek_and_season(csv_path)
+    gameweek = gameweek if gameweek is not None else inferred_gameweek
+    season = season if season is not None else inferred_season
 
     rows = list(load_csv_rows(csv_path))
     if not rows:
@@ -116,6 +169,8 @@ def import_nba(db, csv_path):
             "duplicate_players": 0,
             "skipped_rows": 0,
             "rows_processed": 0,
+            "stats_added": 0,
+            "stats_skipped": 0,
         }
 
     required_columns = {"team", "player"}
@@ -132,12 +187,20 @@ def import_nba(db, csv_path):
         name: team_id
         for name, team_id in db.query(Team.name, Team.id).filter_by(sport_id=sport.id).all()
     }
-    existing_players = set(db.query(Player.name, Player.team_id).filter_by(sport_id=sport.id).all())
+    existing_players = {
+        (name, team_id): player_id
+        for name, team_id, player_id in db.query(Player.name, Player.team_id, Player.id)
+        .filter_by(sport_id=sport.id)
+        .all()
+    }
+    stat_key_cache = load_stat_key_cache(db)
 
     teams_added = 0
     players_added = 0
     skipped_rows = 0
     duplicate_players = 0
+    stats_added = 0
+    stats_skipped = 0
     pending_changes = 0
 
     total_rows = len(rows)
@@ -160,19 +223,42 @@ def import_nba(db, csv_path):
             pending_changes += 1
 
         player_key = (player_name, team_id)
-        if player_key in existing_players:
+        player_id = existing_players.get(player_key)
+        if player_id is not None:
             duplicate_players += 1
         else:
+            player = Player(
+                name=player_name,
+                team_id=team_id,
+                position="Unknown",
+                sport_id=sport.id,
+            )
+            db.add(player)
+            db.flush()
+            player_id = player.id
+            existing_players[player_key] = player_id
+            players_added += 1
+            pending_changes += 1
+
+        stat_key = (player_id, gameweek, season)
+        if stat_key in stat_key_cache:
+            stats_skipped += 1
+        else:
             db.add(
-                Player(
-                    name=player_name,
-                    team_id=team_id,
-                    position="Unknown",
-                    sport_id=sport.id,
+                PlayerStat(
+                    player_id=player_id,
+                    gameweek=gameweek,
+                    season=season,
+                    minutes=parse_int(get_row_value(row, "MIN")),
+                    pts=parse_int(get_row_value(row, "PTS")),
+                    ast=parse_int(get_row_value(row, "AST")),
+                    reb=parse_int(get_row_value(row, "REB")),
+                    stl=parse_int(get_row_value(row, "STL")),
+                    blk=parse_int(get_row_value(row, "BLK")),
                 )
             )
-            existing_players.add(player_key)
-            players_added += 1
+            stat_key_cache.add(stat_key)
+            stats_added += 1
             pending_changes += 1
 
         if pending_changes >= BATCH_SIZE:
@@ -192,13 +278,16 @@ def import_nba(db, csv_path):
         "duplicate_players": duplicate_players,
         "skipped_rows": skipped_rows,
         "rows_processed": total_rows,
+        "stats_added": stats_added,
+        "stats_skipped": stats_skipped,
     }
 
 
-def import_premier_league(db, csv_paths):
+def import_premier_league(db, csv_paths, gameweek: int | None = None, season: str | None = None):
     sport_id = get_football_sport_id(db)
     team_cache = load_team_cache(db, sport_id)
     player_key_cache = load_player_key_cache(db, sport_id)
+    stat_key_cache = load_stat_key_cache(db)
 
     results = []
     totals = {
@@ -207,6 +296,8 @@ def import_premier_league(db, csv_paths):
         "duplicates_skipped": 0,
         "invalid_rows_skipped": 0,
         "rows_processed": 0,
+        "stats_added": 0,
+        "stats_skipped": 0,
     }
 
     for csv_path_like in csv_paths:
@@ -214,10 +305,16 @@ def import_premier_league(db, csv_paths):
         if not csv_path.exists():
             raise FileNotFoundError(f"Missing file: {csv_path}")
 
+        inferred_gameweek, inferred_season = infer_gameweek_and_season(csv_path)
+        file_gameweek = gameweek if gameweek is not None else inferred_gameweek
+        file_season = season if season is not None else inferred_season
+
         teams_added = 0
         players_added = 0
         duplicates_skipped = 0
         invalid_rows_skipped = 0
+        stats_added = 0
+        stats_skipped = 0
         processed_rows = 0
         pending_rows = 0
 
@@ -236,21 +333,43 @@ def import_premier_league(db, csv_paths):
                 teams_added += 1
 
             player_key = (player_name, team.id)
-            if player_key in player_key_cache:
+            player_id = player_key_cache.get(player_key)
+            if player_id is not None:
                 duplicates_skipped += 1
-                continue
-
-            db.add(
-                Player(
+            else:
+                player = Player(
                     name=player_name,
                     team_id=team.id,
                     position=position or "Unknown",
                     sport_id=sport_id,
                 )
-            )
-            player_key_cache.add(player_key)
-            players_added += 1
-            pending_rows += 1
+                db.add(player)
+                db.flush()
+                player_id = player.id
+                player_key_cache[player_key] = player_id
+                players_added += 1
+                pending_rows += 1
+
+            stat_key = (player_id, file_gameweek, file_season)
+            if stat_key in stat_key_cache:
+                stats_skipped += 1
+            else:
+                db.add(
+                    PlayerStat(
+                        player_id=player_id,
+                        gameweek=file_gameweek,
+                        season=file_season,
+                        minutes=parse_int(get_row_value(row, "minutesPlayed")),
+                        goals=parse_int(get_row_value(row, "goals")),
+                        assists=parse_int(get_row_value(row, "assists")),
+                        yellows=parse_int(get_row_value(row, "yellowCards")),
+                        reds=parse_int(get_row_value(row, "redCards")),
+                        points=parse_float(get_row_value(row, "rating")),
+                    )
+                )
+                stat_key_cache.add(stat_key)
+                stats_added += 1
+                pending_rows += 1
 
             if pending_rows >= BATCH_SIZE:
                 db.commit()
@@ -261,11 +380,15 @@ def import_premier_league(db, csv_paths):
 
         file_result = {
             "file": str(csv_path),
+            "gameweek": file_gameweek,
+            "season": file_season,
             "teams_added": teams_added,
             "players_added": players_added,
             "duplicates_skipped": duplicates_skipped,
             "invalid_rows_skipped": invalid_rows_skipped,
             "rows_processed": processed_rows,
+            "stats_added": stats_added,
+            "stats_skipped": stats_skipped,
         }
         results.append(file_result)
         totals["teams_added"] += teams_added
@@ -273,5 +396,7 @@ def import_premier_league(db, csv_paths):
         totals["duplicates_skipped"] += duplicates_skipped
         totals["invalid_rows_skipped"] += invalid_rows_skipped
         totals["rows_processed"] += processed_rows
+        totals["stats_added"] += stats_added
+        totals["stats_skipped"] += stats_skipped
 
     return {"files": results, "totals": totals}

@@ -1,6 +1,7 @@
 # /home/sam069/projects/SportyDataFeeder/app/routers/events.py
 
 import json
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +27,7 @@ def _serialize_event(event: Event) -> EventRead:
     return EventRead.model_validate(
         {
             "id": event.id,
+            "event_id": event.event_id,
             "match_id": event.match_id,
             "event_type": event.event_type,
             "player_id": event.player_id,
@@ -36,7 +38,7 @@ def _serialize_event(event: Event) -> EventRead:
     )
 
 
-@router.get("/{match_id}/events", response_model=list[EventRead])
+@router.get("/matches/{match_id}/events", response_model=list[EventRead])
 def list_match_events(match_id: int, db=Depends(get_db)):
     match = db.query(Match).filter_by(id=match_id).first()
     if not match:
@@ -51,7 +53,7 @@ def list_match_events(match_id: int, db=Depends(get_db)):
     return [_serialize_event(event) for event in events]
 
 
-@router.post("/{match_id}/events", response_model=EventRead, status_code=status.HTTP_201_CREATED)
+@router.post("/matches/{match_id}/events", response_model=EventRead, status_code=status.HTTP_201_CREATED)
 def create_match_event(match_id: int, payload: EventCreate, db=Depends(get_db)):
     match = db.query(Match).filter_by(id=match_id).first()
     if not match:
@@ -63,6 +65,7 @@ def create_match_event(match_id: int, payload: EventCreate, db=Depends(get_db)):
             _not_found("Player", payload.player_id)
 
     event = Event(
+        event_id=str(uuid.uuid4()),
         match_id=match_id,
         event_type=payload.event_type.strip(),
         player_id=payload.player_id,

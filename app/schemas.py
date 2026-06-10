@@ -1,9 +1,11 @@
 # /home/sam069/projects/SportyDataFeeder/app/schemas.py
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
+
+FeederEntity = Literal["sport", "team", "player", "match"]
 
 
 class SportCreate(BaseModel):
@@ -83,6 +85,7 @@ class EventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    event_id: str | None = None
     match_id: int
     event_type: str
     player_id: int | None = None
@@ -91,18 +94,77 @@ class EventRead(BaseModel):
     created_at: datetime
 
 
-class SimulationRequest(BaseModel):
-    match_id: int
+class EntityLinkCreate(BaseModel):
+    feeder_entity: FeederEntity
+    feeder_id: int
+    sporty_uuid: str
 
 
-class SimulationResult(BaseModel):
+class EntityLinkRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    feeder_entity: str
+    feeder_id: int
+    sporty_uuid: str
+
+
+class SimulateStartRequest(BaseModel):
+    """Start a simulation for an existing match (match_id) OR create one from
+    team ids + sport. Optional sporty UUIDs are upserted into entity_links."""
+
+    match_id: int | None = None
+    home_team_id: int | None = None
+    away_team_id: int | None = None
+    sport_id: int | None = None
+    sporty_match_id: str | None = None
+    sporty_home_team_id: str | None = None
+    sporty_away_team_id: str | None = None
+
+
+class SimulateStartResponse(BaseModel):
     match_id: int
-    events_inserted: int
     status: str
+    status_url: str
+
+
+class SimulationStatusRead(BaseModel):
+    match_id: int
+    status: str
+    current_minute: int
+    total_minutes: int
+    home_score: int
+    away_score: int
+    events_inserted: int
+    push_failures: int
+    error: str | None = None
+
+
+class ReplayPushResult(BaseModel):
+    match_id: int
+    delivered: bool
+    events_sent: int
+
+
+class PredictRequest(BaseModel):
+    match_id: int
+
+
+class PredictResponse(BaseModel):
+    match_id: int
+    home_win_prob: float
+    draw_prob: float
+    away_win_prob: float
+    model_version: str
+    home_strength: float
+    away_strength: float
+    pushed: bool
 
 
 class ImportNBARequest(BaseModel):
     csv_path: str
+    gameweek: int | None = None
+    season: str | None = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -117,6 +179,8 @@ class ImportNBARequest(BaseModel):
 
 class ImportPremierLeagueRequest(BaseModel):
     csv_paths: list[str]
+    gameweek: int | None = None
+    season: str | None = None
 
     model_config = ConfigDict(
         json_schema_extra={

@@ -1,316 +1,349 @@
 # /home/sam069/projects/SportyDataFeeder/app/services/simulation.py
+#
+# Stat-weighted live simulation (PRD R-4.1). Runs as an asyncio background
+# task: POST /simulate returns 202 immediately and the loop Bernoulli-samples
+# per-player per-minute event probabilities (event_rates.pkl, cold-start
+# fallback per R-3.1). Every fired event gets a UUID event_id (idempotency
+# key), is written to the local events table, and the minute batch is pushed
+# to the Sporty backend in ONE HTTP call. Scores come from scoring_rules
+# (R-2.4) — never computed here.
 
+import asyncio
 import json
 import logging
-import random
-from datetime import date, datetime, time
+import uuid
+from dataclasses import dataclass, field
 
-from app.database import Event, Match, Player, Sport, Team
+import numpy
+
+from app.config import get_settings
+from app.database import EntityLink, Event, Match, Player, PlayerMatchRating, SessionFactory, Sport
+from app.services.backend_client import BackendClient
+from app.services.features import BASKETBALL_FALLBACK_RATES, FOOTBALL_FALLBACK_RATES
+from app.services.rater import find_man_of_match, rate_players
+from app.services.scoring_rules import BASKETBALL_POINT_VALUES, event_score_value
+from app.services.sport_resolver import SportType, resolve_sport_type
 
 logger = logging.getLogger(__name__)
 
-FOOTBALL_EVENT_TYPES = [
-    ("Goal", "goal"),
-    ("Assist", "assist"),
-    ("Yellow Card", "yellow_card"),
-    ("Red Card", "red_card"),
-]
-BASKETBALL_EVENT_TYPES = [
-    ("2PT", "point_2"),
-    ("3PT", "point_3"),
-    ("FT", "free_throw"),
-    ("Assist", "assist"),
-    ("Rebound", "rebound"),
-    ("Block", "block"),
-    ("Steal", "steal"),
-    ("Turnover", "turnover"),
-]
+TOTAL_MINUTES = {SportType.FOOTBALL: 90, SportType.BASKETBALL: 48}
+LINEUP_SIZE = {SportType.FOOTBALL: 11, SportType.BASKETBALL: 10}
 
 
-def clean_text(value: str) -> str:
-    return (value or "").strip()
+@dataclass
+class SimulationState:
+    match_id: int
+    sport_type: SportType
+    total_minutes: int
+    status: str = "running"  # running | finished | stopped | error
+    current_minute: int = 0
+    home_score: int = 0
+    away_score: int = 0
+    events_inserted: int = 0
+    push_failures: int = 0
+    stop_requested: bool = False
+    error: str | None = None
+    task: asyncio.Task | None = field(default=None, repr=False)
 
 
-def get_team_name(db, team_id):
-    team = db.query(Team).filter_by(id=team_id).first()
-    return team.name if team else "Unknown"
+# Match-scoped registry: concurrent simulations of different matches never
+# share state. One running simulation per match (409 enforced at the router).
+_simulations: dict[int, SimulationState] = {}
 
 
-def get_player_name(db, player_id):
-    player = db.query(Player).filter_by(id=player_id).first()
-    return player.name if player else "Unknown"
+def get_simulation_state(match_id: int) -> SimulationState | None:
+    return _simulations.get(match_id)
 
 
-def get_sport_name(db, sport_id):
-    sport = db.query(Sport).filter_by(id=sport_id).first()
-    return sport.name if sport else "Unknown"
+def is_running(match_id: int) -> bool:
+    state = _simulations.get(match_id)
+    return state is not None and state.status == "running"
 
 
-def humanize_event_type(event_type: str) -> str:
-    mapping = {
-        "goal": "Goal",
-        "assist": "Assist",
-        "yellow_card": "Yellow Card",
-        "red_card": "Red Card",
-        "point_2": "2PT",
-        "point_3": "3PT",
-        "free_throw": "FT",
-        "rebound": "Rebound",
-        "block": "Block",
-        "steal": "Steal",
-        "turnover": "Turnover",
-    }
-    return mapping.get(event_type, event_type.replace("_", " ").title())
+def request_stop(match_id: int) -> bool:
+    state = _simulations.get(match_id)
+    if state is None or state.status != "running":
+        return False
+    state.stop_requested = True
+    return True
 
 
-def get_supported_event_types(sport_name: str):
-    sport_name = (sport_name or "").lower()
-    if "basket" in sport_name:
-        return BASKETBALL_EVENT_TYPES
-    return FOOTBALL_EVENT_TYPES
+def running_count() -> int:
+    return sum(1 for state in _simulations.values() if state.status == "running")
 
 
-def build_random_match_simulation(db, sport_name, home_team_id=None, away_team_id=None):
-    normalized_sport_name = clean_text(sport_name).lower()
-    sport_aliases = {
-        "football": ["football", "soccer", "premier league"],
-        "basketball": ["basketball", "nba"],
-    }
+def _fallback_rates(sport_type: SportType) -> dict[str, float]:
+    if sport_type is SportType.BASKETBALL:
+        return BASKETBALL_FALLBACK_RATES
+    return FOOTBALL_FALLBACK_RATES
 
-    sport = None
-    for alias in sport_aliases.get(normalized_sport_name, [normalized_sport_name]):
-        sport = db.query(Sport).filter(Sport.name.ilike(alias)).first()
-        if sport:
-            break
-        sport = db.query(Sport).filter(Sport.name.ilike(f"%{alias}%")).first()
-        if sport:
-            break
 
-    if not sport:
-        raise ValueError(f"Sport '{sport_name}' was not found in the database.")
-
-    teams = db.query(Team).filter_by(sport_id=sport.id).order_by(Team.name.asc()).all()
-    if len(teams) < 2:
-        raise ValueError(f"Need at least two teams for {sport.name} before simulating a match.")
-
-    if home_team_id is not None and away_team_id is not None:
-        team_lookup = {team.id: team for team in teams}
-        home_team = team_lookup.get(home_team_id)
-        away_team = team_lookup.get(away_team_id)
-        if not home_team or not away_team:
-            raise ValueError(f"Selected teams are not available for {sport.name}.")
-        if home_team.id == away_team.id:
-            raise ValueError("Home and away teams must be different.")
-    else:
-        home_team, away_team = random.sample(teams, 2)
-
-    players_by_team = {}
-    all_players = (
-        db.query(Player)
-        .filter(Player.sport_id == sport.id)
-        .order_by(Player.name.asc())
+def _load_entity_uuid_map(db, entity: str, feeder_ids: list[int]) -> dict[int, str]:
+    if not feeder_ids:
+        return {}
+    links = (
+        db.query(EntityLink)
+        .filter(EntityLink.feeder_entity == entity, EntityLink.feeder_id.in_(feeder_ids))
         .all()
     )
-    player_team_map = {player.id: player.team_id for player in all_players}
-    for team in teams:
-        team_players = [player for player in all_players if player.team_id == team.id]
-        players_by_team[team.id] = team_players
-
-    def pick_team_player(team_id):
-        team_players = players_by_team.get(team_id) or all_players
-        if not team_players:
-            raise ValueError(f"Need players for {sport.name} before simulating a match.")
-        return random.choice(team_players)
-
-    events = []
-    if "basket" in sport.name.lower():
-        event_count = random.randint(40, 70)
-        weighted_event_types = [
-            "point_2",
-            "point_2",
-            "point_2",
-            "point_3",
-            "point_3",
-            "free_throw",
-            "assist",
-            "assist",
-            "rebound",
-            "rebound",
-            "block",
-            "steal",
-            "turnover",
-        ]
-        point_values = {"point_2": 2, "point_3": 3, "free_throw": 1}
-
-        for _ in range(event_count):
-            event_type = random.choice(weighted_event_types)
-            team = random.choice([home_team, away_team])
-            player = pick_team_player(team.id)
-            extra_payload = {}
-
-            if event_type in point_values:
-                extra_payload["points"] = point_values[event_type]
-                if random.random() < 0.35:
-                    assist_candidates = [p for p in players_by_team.get(team.id, []) if p.id != player.id]
-                    if assist_candidates:
-                        extra_payload["assist_player_id"] = random.choice(assist_candidates).id
-
-            events.append(
-                {
-                    "minute": random.randint(1, 48),
-                    "event_type": event_type,
-                    "player_id": player.id,
-                    "extra": extra_payload,
-                }
-            )
-
-        events.sort(key=lambda item: (item["minute"], item["event_type"], item["player_id"]))
-    else:
-        goal_count = random.randint(0, 5)
-        card_count = random.randint(0, 3)
-        goal_minutes = random.sample(range(1, 91), goal_count) if goal_count else []
-        card_minutes = random.sample(range(1, 91), card_count) if card_count else []
-
-        for minute in goal_minutes:
-            scoring_team = random.choice([home_team, away_team])
-            scorer = pick_team_player(scoring_team.id)
-            extra_payload = {}
-            assist_candidates = [p for p in players_by_team.get(scoring_team.id, []) if p.id != scorer.id]
-            if assist_candidates and random.random() < 0.7:
-                extra_payload["assist_player_id"] = random.choice(assist_candidates).id
-            events.append(
-                {
-                    "minute": minute,
-                    "event_type": "goal",
-                    "player_id": scorer.id,
-                    "extra": extra_payload,
-                }
-            )
-
-        for minute in card_minutes:
-            card_type = random.choice(["yellow_card", "red_card"])
-            card_team = random.choice([home_team, away_team])
-            card_player = pick_team_player(card_team.id)
-            events.append(
-                {
-                    "minute": minute,
-                    "event_type": card_type,
-                    "player_id": card_player.id,
-                    "extra": {},
-                }
-            )
-
-        events.sort(key=lambda item: (item["minute"], item["event_type"], item["player_id"]))
-
-    home_score = 0
-    away_score = 0
-    for event_data in events:
-        event_team_id = player_team_map.get(event_data["player_id"])
-        if event_team_id not in {home_team.id, away_team.id}:
-            continue
-        if "basket" in sport.name.lower():
-            if event_data["event_type"] in {"point_2", "point_3", "free_throw"}:
-                points_value = event_data["extra"].get("points", 0)
-                if event_team_id == home_team.id:
-                    home_score += points_value
-                else:
-                    away_score += points_value
-        elif event_data["event_type"] == "goal":
-            if event_team_id == home_team.id:
-                home_score += 1
-            else:
-                away_score += 1
-
-    return {
-        "sport_id": sport.id,
-        "sport_name": sport.name,
-        "home_team_id": home_team.id,
-        "home_team_name": home_team.name,
-        "away_team_id": away_team.id,
-        "away_team_name": away_team.name,
-        "events": events,
-        "home_score": home_score,
-        "away_score": away_score,
-        "goal_events": sum(1 for event in events if event["event_type"] == "goal"),
-        "card_events": sum(1 for event in events if event["event_type"] in {"yellow_card", "red_card"}),
-        "total_events": len(events),
-    }
+    return {link.feeder_id: link.sporty_uuid for link in links}
 
 
-def simulate_match_live(db, match_id):
+def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
+    """Synchronous setup: lineups, per-player rates, ID mappings."""
     match = db.query(Match).filter_by(id=match_id).first()
     if not match:
         raise ValueError(f"Match {match_id} not found")
 
     sport = db.query(Sport).filter_by(id=match.sport_id).first()
-    if not sport:
-        raise ValueError(f"Sport {match.sport_id} not found for match {match_id}")
+    sport_type = resolve_sport_type(sport.name if sport else None)
+    if sport_type is SportType.UNKNOWN:
+        raise ValueError(f"Unknown sport '{sport.name if sport else None}' for match {match_id}")
 
-    plan = build_random_match_simulation(
-        db,
-        sport.name,
-        home_team_id=match.home_team_id,
-        away_team_id=match.away_team_id,
-    )
+    lineup_size = LINEUP_SIZE[sport_type]
+    lineups: list[Player] = []
+    for team_id in (match.home_team_id, match.away_team_id):
+        players = (
+            db.query(Player)
+            .filter_by(team_id=team_id)
+            .order_by(Player.id.asc())
+            .limit(lineup_size)
+            .all()
+        )
+        if not players:
+            raise ValueError(f"Team {team_id} has no players; cannot simulate match {match_id}")
+        lineups.extend(players)
 
-    match.status = "live"
-    db.commit()
+    event_rates = event_rates or {}
+    rates_by_player: dict[int, dict[str, float]] = {}
+    cold_starts = 0
+    for player in lineups:
+        rates = event_rates.get(player.id)
+        if not rates:
+            rates = _fallback_rates(sport_type)
+            cold_starts += 1
+        rates_by_player[player.id] = rates
+    if cold_starts:
+        logger.warning(
+            "Match %s: %s/%s lineup players have no trained rates; using league-average fallback",
+            match_id, cold_starts, len(lineups),
+        )
 
-    running_home_score = 0
-    running_away_score = 0
-    inserted_events = 0
-    player_team_map = {
-        player.id: player.team_id
-        for player in db.query(Player).filter(Player.sport_id == plan["sport_id"]).all()
+    player_ids = [player.id for player in lineups]
+    mappings = {
+        "match": _load_entity_uuid_map(db, "match", [match_id]).get(match_id),
+        "teams": _load_entity_uuid_map(db, "team", [match.home_team_id, match.away_team_id]),
+        "players": _load_entity_uuid_map(db, "player", player_ids),
+    }
+    if mappings["match"] is None:
+        logger.warning(
+            "Match %s has no sporty_match_id link; pushes are skipped (events persist locally — "
+            "map it via POST /links and use replay-push)",
+            match_id,
+        )
+
+    return {
+        "match": match,
+        "sport_type": sport_type,
+        "lineups": lineups,
+        "player_team_map": {player.id: player.team_id for player in lineups},
+        "rates_by_player": rates_by_player,
+        "mappings": mappings,
     }
 
-    for index, event_data in enumerate(plan["events"], start=1):
+
+def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
+    """Bernoulli-sample each event type for each active player for one minute."""
+    fired: list[dict] = []
+    for player in setup["lineups"]:
+        for event_type, probability in setup["rates_by_player"][player.id].items():
+            p = min(max(float(probability), 0.0), 1.0)
+            if p <= 0.0 or not numpy.random.binomial(1, p):
+                continue
+            extra = None
+            if event_type in BASKETBALL_POINT_VALUES and setup["sport_type"] is SportType.BASKETBALL:
+                extra = {"points": BASKETBALL_POINT_VALUES[event_type]}
+            fired.append(
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "event_type": event_type,
+                    "player_id": player.id,
+                    "team_id": player.team_id,
+                    "minute": minute,
+                    "extra": extra,
+                }
+            )
+    return fired
+
+
+def build_match_result_payload(state: SimulationState, mappings: dict, status: str, events: list[dict]) -> dict:
+    return {
+        "sporty_match_id": mappings["match"],
+        "sport": state.sport_type.value,
+        "status": status,
+        "home_score": state.home_score,
+        "away_score": state.away_score,
+        "current_minute": state.current_minute,
+        "events": [
+            {
+                "event_id": event["event_id"],
+                "event_type": event["event_type"],
+                "sporty_player_id": mappings["players"].get(event["player_id"]),
+                "sporty_team_id": mappings["teams"].get(event["team_id"]),
+                "minute": event["minute"],
+            }
+            for event in events
+        ],
+    }
+
+
+def build_player_ratings_payload(
+    state: SimulationState,
+    mappings: dict,
+    ratings: dict[int, float],
+    events_by_player: dict[int, list[str]],
+    man_of_match: int | None,
+) -> dict:
+    return {
+        "sporty_match_id": mappings["match"],
+        "sport": state.sport_type.value,
+        "man_of_match_sporty_player_id": mappings["players"].get(man_of_match),
+        "ratings": [
+            {
+                "sporty_player_id": mappings["players"].get(player_id),
+                "rating": rating,
+                "goals": events_by_player.get(player_id, []).count("goal"),
+                "assists": events_by_player.get(player_id, []).count("assist"),
+                "minutes_played": state.current_minute,
+                "events": events_by_player.get(player_id, []),
+            }
+            for player_id, rating in sorted(ratings.items())
+        ],
+    }
+
+
+def _store_ratings(db, match_id: int, ratings: dict[int, float], man_of_match: int | None) -> None:
+    db.query(PlayerMatchRating).filter_by(match_id=match_id).delete()
+    for player_id, rating in ratings.items():
         db.add(
-            Event(
-                match_id=match.id,
-                event_type=event_data["event_type"],
-                player_id=event_data["player_id"],
-                minute=event_data["minute"],
-                extra=json.dumps(event_data["extra"]) if event_data["extra"] else None,
+            PlayerMatchRating(
+                match_id=match_id,
+                player_id=player_id,
+                rating=rating,
+                is_man_of_match=player_id == man_of_match,
             )
         )
+    db.commit()
+
+
+async def run_simulation(
+    state: SimulationState,
+    event_rates: dict | None,
+    client: BackendClient,
+) -> SimulationState:
+    """The background simulation loop. Never raises: failures mark the state
+    (and match) as error; push failures are tolerated (R-4.2)."""
+    db = SessionFactory()
+    speed = get_settings().SIMULATION_SPEED
+    events_by_player: dict[int, list[str]] = {}
+    try:
+        setup = _prepare(db, state.match_id, event_rates)
+        match = setup["match"]
+        mappings = setup["mappings"]
+        push_enabled = mappings["match"] is not None
+
+        match.status = "live"
         db.commit()
-        inserted_events += 1
+        logger.info("Match %s: simulation started (%s, %s minutes)", state.match_id, state.sport_type.value, state.total_minutes)
 
-        event_team_id = player_team_map.get(event_data["player_id"])
-        score_delta = 0
-        if "basket" in plan["sport_name"].lower():
-            if event_data["event_type"] in {"point_2", "point_3", "free_throw"}:
-                score_delta = int(event_data["extra"].get("points", 0) or 0)
-        elif event_data["event_type"] == "goal":
-            score_delta = 1
+        for minute in range(1, state.total_minutes + 1):
+            if state.stop_requested:
+                logger.info("Match %s: stop requested at minute %s", state.match_id, state.current_minute)
+                break
 
-        if event_team_id == plan["home_team_id"]:
-            running_home_score += score_delta
-        elif event_team_id == plan["away_team_id"]:
-            running_away_score += score_delta
+            state.current_minute = minute
+            minute_events = _sample_minute_events(setup, minute)
 
-        player_name = get_player_name(db, event_data["player_id"])
-        if event_data["event_type"] == "goal" and event_data["extra"].get("assist_player_id"):
-            assist_name = get_player_name(db, event_data["extra"]["assist_player_id"])
-            latest_event = f"⚽ Goal by {player_name} ({event_data['minute']}') • Assist: {assist_name}"
-        elif event_data["event_type"] in {"point_2", "point_3", "free_throw"}:
-            latest_event = f"🏀 {humanize_event_type(event_data['event_type'])} by {player_name} ({event_data['minute']}')"
-        elif event_data["event_type"] in {"yellow_card", "red_card"}:
-            latest_event = f"🟨 {humanize_event_type(event_data['event_type'])} for {player_name} ({event_data['minute']}')"
-        else:
-            latest_event = f"{humanize_event_type(event_data['event_type'])} by {player_name} ({event_data['minute']}')"
+            for event in minute_events:
+                db.add(
+                    Event(
+                        event_id=event["event_id"],
+                        match_id=state.match_id,
+                        event_type=event["event_type"],
+                        player_id=event["player_id"],
+                        minute=event["minute"],
+                        extra=json.dumps(event["extra"]) if event["extra"] else None,
+                    )
+                )
+                events_by_player.setdefault(event["player_id"], []).append(event["event_type"])
+                delta = event_score_value(event["event_type"], event["extra"], state.sport_type)
+                if delta:
+                    if event["team_id"] == match.home_team_id:
+                        state.home_score += delta
+                    else:
+                        state.away_score += delta
+            db.commit()
+            state.events_inserted += len(minute_events)
+            logger.debug(
+                "Match %s minute %s: %s events, score %s-%s",
+                state.match_id, minute, len(minute_events), state.home_score, state.away_score,
+            )
+
+            # One HTTP call per minute tick — never per-event (R-4.1 step 5).
+            if push_enabled and minute_events:
+                payload = build_match_result_payload(state, mappings, "live", minute_events)
+                if not await client.push_match_result(payload):
+                    state.push_failures += 1
+
+            await asyncio.sleep(speed)
+
+        state.status = "stopped" if state.stop_requested else "finished"
+        match.status = "finished"
+        db.commit()
+
+        ratings = rate_players(events_by_player, state.sport_type)
+        man_of_match = find_man_of_match(ratings)
+        if ratings:
+            _store_ratings(db, state.match_id, ratings, man_of_match)
+
+        if push_enabled:
+            final_payload = build_match_result_payload(state, mappings, "finished", [])
+            if not await client.push_match_result(final_payload):
+                state.push_failures += 1
+            if ratings:
+                ratings_payload = build_player_ratings_payload(state, mappings, ratings, events_by_player, man_of_match)
+                if not await client.push_player_ratings(ratings_payload):
+                    state.push_failures += 1
 
         logger.info(
-            "Match %s: %s -> %s-%s (evt %s/%s)",
-            match.id,
-            latest_event,
-            running_home_score,
-            running_away_score,
-            index,
-            max(len(plan["events"]), 1),
+            "Match %s: simulation %s at minute %s, score %s-%s, %s events, %s push failures",
+            state.match_id, state.status, state.current_minute,
+            state.home_score, state.away_score, state.events_inserted, state.push_failures,
         )
+    except Exception as exc:
+        state.status = "error"
+        state.error = str(exc)
+        logger.exception("Match %s: simulation crashed; partial events retained locally", state.match_id)
+        try:
+            db.rollback()
+            match = db.query(Match).filter_by(id=state.match_id).first()
+            if match:
+                match.status = "error"
+                db.commit()
+        except Exception:
+            logger.exception("Match %s: failed to mark match as error", state.match_id)
+    finally:
+        db.close()
+    return state
 
-    match.status = "finished"
-    db.commit()
-    return inserted_events
+
+def start_simulation(match_id: int, sport_type: SportType, event_rates: dict | None, client: BackendClient) -> SimulationState:
+    """Register state and schedule the background task on the running loop."""
+    state = SimulationState(
+        match_id=match_id,
+        sport_type=sport_type,
+        total_minutes=TOTAL_MINUTES[sport_type],
+    )
+    _simulations[match_id] = state
+    state.task = asyncio.get_running_loop().create_task(run_simulation(state, event_rates, client))
+    return state
