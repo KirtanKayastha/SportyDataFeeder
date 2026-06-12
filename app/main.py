@@ -1,10 +1,13 @@
 # /home/sam069/projects/SportyDataFeeder/app/main.py
 
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.config import get_settings
 from app.database import engine
 from app.routers import events, imports, links, matches, players, predict, simulation, sports, teams
 from app.services.ml_models import load_all_models
@@ -24,6 +27,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sporty Data Feeder API", version="1.0.0", lifespan=lifespan)
+
+# R-2.10: every route requires the shared X-Feeder-Secret header except the
+# open endpoints below (health probes and interactive docs stay reachable).
+_AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json"}
+
+
+@app.middleware("http")
+async def require_feeder_secret(request: Request, call_next):
+    if request.url.path not in _AUTH_EXEMPT_PATHS:
+        provided = request.headers.get("X-Feeder-Secret", "")
+        if not secrets.compare_digest(provided, get_settings().FEEDER_SECRET):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Missing or invalid X-Feeder-Secret header"},
+            )
+    return await call_next(request)
+
 
 app.include_router(sports.router, prefix="/sports", tags=["Sports"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])

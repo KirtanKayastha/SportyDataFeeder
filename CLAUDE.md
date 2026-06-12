@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Sporty Data Feeder is a FastAPI + SQLAlchemy service for managing sports data (sports, teams, players, matches, events), running stat-weighted live match simulations, pushing live data to the Sporty backend, and importing player rosters and per-gameweek stats from CSV. It was migrated from a Streamlit app to an API-first design; the Streamlit UI is gone. Phase 2 hardening (Stage B, R-2.1–R-2.9), Phase 3 features + ML (Stage C, R-3.1–R-3.5), and Phase 4 simulation + push (Stage D, R-4.1–R-4.5) are complete.
+Sporty Data Feeder is a FastAPI + SQLAlchemy service for managing sports data (sports, teams, players, matches, events), running stat-weighted live match simulations, pushing live data to the Sporty backend, and importing player rosters and per-gameweek stats from CSV. It was migrated from a Streamlit app to an API-first design; the Streamlit UI is gone. Phase 2 hardening (Stage B, R-2.1–R-2.10 incl. auth middleware), Phase 3 features + ML (Stage C, R-3.1–R-3.5), Phase 4 simulation + push (Stage D, R-4.1–R-4.5), Phase 5 Sporty integration (Stage E), and Stage F polish (Docker, runbook) are complete.
 
 ## Commands
 
@@ -73,4 +73,4 @@ The live application is the `app/` package. Request flow: `app/main.py` register
 
 - **Simulation tests need care:** concurrent asyncio tasks share one thread, so simulations use `SessionFactory()` (not the thread-scoped `Session`). Tests that pass `sporty_match_id` MUST use the `mock_backend` fixture or pushes hit an unreachable URL and burn ~3.75s of retry backoff per minute-batch. `tests/conftest.py` clears the simulation registry between tests.
 
-The build plan is PRD.md — follow requirement IDs and stage gates. Stages B, C, D, and E are complete (Stage E lives in the Sporty_Backend repo at `~/projects/Sporty/Sporty_Backend` — see `app/api/v1/feed.py` there; the backend publishes to `{REDIS_PUBSUB_PREFIX}:{key}` channels, not the PRD's assumed `live:match:*`). Remaining: R-2.10 (auth middleware, deliberately deferred out of the Stage B run) and Stage F polish (Docker, README runbook).
+The build plan is PRD.md — follow requirement IDs and stage gates. All stages (B–F) are complete. Stage E lives in the Sporty_Backend repo at `~/projects/Sporty/Sporty_Backend` — see `app/api/v1/feed.py` there; the backend publishes to `{REDIS_PUBSUB_PREFIX}:{key}` channels, not the PRD's assumed `live:match:*`. R-2.10 auth is an HTTP middleware in `app/main.py`: every route except `/health`, `/docs`, `/openapi.json` requires `X-Feeder-Secret` matching `FEEDER_SECRET` (401 otherwise; tests attach the header via the `client` fixture in `tests/conftest.py`). Docker: `Dockerfile` runs migrations + seeding on start; `models_pkl/` is deliberately not baked into the image. The end-to-end runbook (feeder + Sporty backend + frontend) is in README.md.

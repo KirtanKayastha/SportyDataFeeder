@@ -11,6 +11,7 @@ _db_fd, _db_path = tempfile.mkstemp(prefix="feeder_test_", suffix=".db")
 os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 os.environ["SIMULATION_SPEED"] = "0"
+os.environ["FEEDER_SECRET"] = "test-feeder-secret"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +33,9 @@ def fresh_db():
 
 @pytest.fixture
 def client():
-    with TestClient(app) as test_client:
+    # All routes except /health, /docs and /openapi.json require the shared
+    # secret (R-2.10); attach it once so every test request is authenticated.
+    with TestClient(app, headers={"X-Feeder-Secret": "test-feeder-secret"}) as test_client:
         yield test_client
 
 

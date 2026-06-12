@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+__pycache__
+**/__pycache__
+.pytest_cache
+*.pyc
+.env
+models_pkl/
+tests/
+*.csv
+legacy_database.py.bak
+graphify-out/

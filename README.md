@@ -74,6 +74,35 @@ uvicorn app.main:app --reload
 
 5. Open the docs at `http://localhost:8000/docs`. Health check at `/health` (also reports whether the ML models are loaded).
 
+## API authentication
+
+Every endpoint except `/health`, `/docs`, and `/openapi.json` requires the shared secret header:
+
+```
+X-Feeder-Secret: <FEEDER_SECRET from .env>
+```
+
+Requests without it (or with a wrong value) get `401`. The same secret authenticates the feeder's outbound pushes to the Sporty backend, so the value must be identical in this repo's `.env` and the Sporty backend's `.env`. In the Swagger UI at `/docs`, pass the header per-request via the endpoint's parameters, or use `curl`:
+
+```bash
+curl -H "X-Feeder-Secret: $FEEDER_SECRET" http://localhost:8000/sports/
+```
+
+## Docker
+
+```bash
+docker build -t sporty-feeder .
+docker run --env-file .env -p 8000:8000 sporty-feeder
+```
+
+The container runs `alembic upgrade head` and seeds the sports table on start, then serves the API on `:8000`. `models_pkl/` is not baked into the image (the pkls are keyed by your database's player ids) — either mount one in (`-v $(pwd)/models_pkl:/srv/feeder/models_pkl`) or train inside the container:
+
+```bash
+docker exec <container> python -m scripts.train_models   # then restart the container
+```
+
+Works with podman too (`podman build` / `podman run`); if rootless podman's `-p` port mapping doesn't respond on your machine, run with `--network=host` instead.
+
 ## Training the models
 
 After importing stats (and ideally finishing some matches):
@@ -103,13 +132,42 @@ The simulation Bernoulli-samples each player's per-minute event probabilities (c
 
 The `sports` table must be seeded first (`python -m scripts.seed_sports`).
 
+## End-to-end with Sporty (backend + frontend)
+
+The full live-match pipeline is: **feeder simulation → `POST {SPORTY_BACKEND_URL}/api/v1/feed/*` → Sporty backend upserts events + publishes to Redis → frontend WebSocket (`/api/ws/match/{id}`) renders live score, prediction, and ratings** on the match page (`/match/{matchId}`).
+
+To run all three locally:
+
+1. **Sporty backend** (`~/projects/Sporty/Sporty_Backend`) on port **8000** — the frontend dev proxy assumes this. Set `FEEDER_SECRET` in its `.env` to the same value as this repo's `.env` (empty disables the feed endpoints with a 503).
+2. **Sporty frontend** (`~/projects/Sporty/sporty-frontend`): `yarn dev` on port 3000.
+3. **Feeder** on a different port, pointing at the backend:
+   ```bash
+   SPORTY_BACKEND_URL=http://localhost:8000 uvicorn app.main:app --reload --port 8010
+   ```
+4. **Link the entities.** Pushes are skipped (with a WARNING) until the feeder match is mapped to a Sporty match UUID. For each feeder match/team/player involved:
+   ```bash
+   curl -X POST http://localhost:8010/links \
+     -H "X-Feeder-Secret: $FEEDER_SECRET" -H "Content-Type: application/json" \
+     -d '{"feeder_entity": "match", "feeder_id": 1, "sporty_uuid": "<sporty match UUID>"}'
+   ```
+   (Player links let the backend credit fantasy points; an unlinked player's events still update the score.)
+5. **Simulate:**
+   ```bash
+   curl -X POST http://localhost:8010/simulate \
+     -H "X-Feeder-Secret: $FEEDER_SECRET" -H "Content-Type: application/json" \
+     -d '{"match_id": 1}'
+   ```
+6. Open `http://localhost:3000/match/<sporty match UUID>` — the score ticker, events, prediction card, and (after the final whistle) player ratings update live.
+
+If the backend was down during a simulation, re-deliver everything with `POST /matches/{id}/replay-push` — the backend dedupes on `event_id`, so replays are always safe.
+
 ## Tests
 
 ```bash
 pytest
 ```
 
-The suite (in [tests/](tests)) runs against a throwaway SQLite database — no Postgres needed. It covers app boot/health, CRUD for every resource, scoring rules for football and basketball, sport-resolver aliases, entity links, importer idempotency, sport seeding, and verifies that `alembic upgrade head` builds the full schema on an empty database.
+The suite (in [tests/](tests)) runs against a throwaway SQLite database — no Postgres needed. It covers app boot/health, the auth middleware, CRUD for every resource, scoring rules for football and basketball, sport-resolver aliases, entity links, importer idempotency, sport seeding, and verifies that `alembic upgrade head` builds the full schema on an empty database.
 
 ## Code locations
 
