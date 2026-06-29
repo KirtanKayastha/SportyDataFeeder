@@ -12,6 +12,9 @@ os.close(_db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_path}"
 os.environ["SIMULATION_SPEED"] = "0"
 os.environ["FEEDER_SECRET"] = "test-feeder-secret"
+# Tests inject fixed event rates and assert on raw counts, so disable the
+# real-league scoring calibration here; it is covered by a dedicated unit test.
+os.environ["SIMULATION_CALIBRATE"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient

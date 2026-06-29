@@ -54,6 +54,22 @@ def inject_high_goal_rates(client, world, rate=0.5):
 
 
 @pytest.fixture
+def basketball_world(client):
+    sport_id = client.post("/sports", json={"name": "basketball"}).json()["id"]
+    home = client.post("/teams", json={"name": "BKH", "sport_id": sport_id}).json()["id"]
+    away = client.post("/teams", json={"name": "BKA", "sport_id": sport_id}).json()["id"]
+    players = {home: [], away: []}
+    for team_id, prefix in ((home, "H"), (away, "A")):
+        for index in range(5):
+            player = client.post(
+                "/players",
+                json={"name": f"{prefix} {index}", "team_id": team_id, "position": "G", "sport_id": sport_id},
+            ).json()
+            players[team_id].append(player["id"])
+    return {"sport_id": sport_id, "home": home, "away": away, "players": players}
+
+
+@pytest.fixture
 def mock_backend(monkeypatch):
     """Capture pushes in-memory; swap `handler` to simulate outages."""
     captured = {"match_result": [], "prediction": [], "player_ratings": []}
@@ -80,6 +96,42 @@ def mock_backend(monkeypatch):
 
 
 class TestBackgroundSimulation:
+    def test_basketball_tie_goes_to_overtime_no_draw(
+        self, client, basketball_world, wait_for_simulation, monkeypatch
+    ):
+        """A regulation tie triggers overtime until a winner emerges (no draws)."""
+        import uuid
+
+        def fake_sample(setup, minute):
+            home_tid = setup["match"].home_team_id
+            away_tid = setup["match"].away_team_id
+            home_p = next(p for p in setup["lineups"] if p.team_id == home_tid)
+            away_p = next(p for p in setup["lineups"] if p.team_id == away_tid)
+
+            def ev(player, tid):
+                return {
+                    "event_id": str(uuid.uuid4()), "event_type": "point_2",
+                    "player_id": player.id, "team_id": tid, "minute": minute,
+                    "extra": {"points": 2},
+                }
+
+            if minute == 1:  # tied 2-2 through regulation
+                return [ev(home_p, home_tid), ev(away_p, away_tid)]
+            if minute == 49:  # first overtime minute: home breaks the tie
+                return [ev(home_p, home_tid)]
+            return []
+
+        monkeypatch.setattr(simulation_service, "_sample_minute_events", fake_sample)
+
+        match_id = make_match(client, basketball_world)
+        client.post("/simulate", json={"match_id": match_id})
+        final = wait_for_simulation(client, match_id)
+
+        assert final["status"] == "finished"
+        assert final["home_score"] != final["away_score"]   # no draw
+        assert final["current_minute"] > 48                  # overtime was played
+        assert (final["home_score"], final["away_score"]) == (4, 2)
+
     def test_returns_202_quickly_and_finishes(self, client, football_world, wait_for_simulation):
         match_id = make_match(client, football_world)
         started = time.monotonic()
@@ -131,7 +183,7 @@ class TestBackgroundSimulation:
         self, client, football_world, wait_for_simulation, monkeypatch
     ):
         monkeypatch.setattr(
-            simulation_service, "get_settings", lambda: SimpleNamespace(SIMULATION_SPEED=0.05)
+            simulation_service, "get_settings", lambda: SimpleNamespace(SIMULATION_SPEED=0.05, SIMULATION_CALIBRATE=False)
         )
         match_id = make_match(client, football_world)
         assert client.post("/simulate", json={"match_id": match_id}).status_code == 202

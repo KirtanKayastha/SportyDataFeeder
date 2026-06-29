@@ -27,7 +27,24 @@ from app.services.sport_resolver import SportType, resolve_sport_type
 logger = logging.getLogger(__name__)
 
 TOTAL_MINUTES = {SportType.FOOTBALL: 90, SportType.BASKETBALL: 48}
-LINEUP_SIZE = {SportType.FOOTBALL: 11, SportType.BASKETBALL: 10}
+# On-court players per side: football 11, basketball 5 (not the 10-man roster —
+# running 10 players for the full 48 minutes doubled the real on-court minutes
+# and inflated every basketball stat ~2x).
+LINEUP_SIZE = {SportType.FOOTBALL: 11, SportType.BASKETBALL: 5}
+
+# Real league HOME/AWAY scoring averages used to calibrate simulated scoring.
+# Calibrating home and away separately bakes in home advantage, so simulated
+# home-win rates approach reality (EPL ~45% home; NBA ~58% home).
+# Sources: 13 EPL seasons, 18 NBA seasons (see reports/).
+FOOTBALL_HOME_GOALS = 1.55
+FOOTBALL_AWAY_GOALS = 1.25
+BASKETBALL_HOME_POINTS = 104.9
+BASKETBALL_AWAY_POINTS = 102.2
+
+# Basketball has no draws: a regulation tie goes to 10-minute overtime periods,
+# repeated until the tie is broken (capped for safety).
+OVERTIME_MINUTES = 10
+MAX_OVERTIME_PERIODS = 6
 
 
 @dataclass
@@ -78,6 +95,52 @@ def _fallback_rates(sport_type: SportType) -> dict[str, float]:
     return FOOTBALL_FALLBACK_RATES
 
 
+def calibrate_scoring_rates(rates_by_player, home_lineup, away_lineup, sport_type, total_minutes):
+    """Scale only the SCORING-event rates so each side's expected score matches
+    its real HOME / AWAY league average, regardless of how raw the per-player
+    rates are (trained or league-average fallback). Home and away are scaled
+    independently, which bakes in home advantage. Non-scoring events (cards,
+    assists, rebounds) are left untouched.
+
+    Returns (scaled_rates, (home_factor, away_factor)); a side's factor is 1.0
+    when it has no scoring rate to scale. Within a side the factor is uniform,
+    so each player's share of the scoring is preserved; only the level changes.
+    Expected side score = total_minutes * sum(per-player scoring rate)."""
+    if sport_type is SportType.FOOTBALL:
+        scoring = ("goal",)
+        home_target, away_target = FOOTBALL_HOME_GOALS, FOOTBALL_AWAY_GOALS
+
+        def per_player(rates):
+            return rates.get("goal", 0.0)
+    elif sport_type is SportType.BASKETBALL:
+        scoring = tuple(BASKETBALL_POINT_VALUES)
+        home_target, away_target = BASKETBALL_HOME_POINTS, BASKETBALL_AWAY_POINTS
+
+        def per_player(rates):
+            return sum(BASKETBALL_POINT_VALUES[ev] * rates.get(ev, 0.0) for ev in BASKETBALL_POINT_VALUES)
+    else:
+        return rates_by_player, (1.0, 1.0)
+
+    def _factor(lineup, target):
+        expected = total_minutes * sum(per_player(rates_by_player[p.id]) for p in lineup)
+        return target / expected if expected > 0 else 1.0
+
+    home_factor = _factor(home_lineup, home_target)
+    away_factor = _factor(away_lineup, away_target)
+    factor_by_player = {p.id: home_factor for p in home_lineup}
+    factor_by_player.update({p.id: away_factor for p in away_lineup})
+
+    scaled = {}
+    for player_id, rates in rates_by_player.items():
+        factor = factor_by_player.get(player_id, 1.0)
+        new_rates = dict(rates)
+        for event_type in scoring:
+            if event_type in new_rates:
+                new_rates[event_type] *= factor
+        scaled[player_id] = new_rates
+    return scaled, (home_factor, away_factor)
+
+
 def _load_entity_uuid_map(db, entity: str, feeder_ids: list[int]) -> dict[int, str]:
     if not feeder_ids:
         return {}
@@ -101,7 +164,7 @@ def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
         raise ValueError(f"Unknown sport '{sport.name if sport else None}' for match {match_id}")
 
     lineup_size = LINEUP_SIZE[sport_type]
-    lineups: list[Player] = []
+    team_lineups: dict[int, list[Player]] = {}
     for team_id in (match.home_team_id, match.away_team_id):
         players = (
             db.query(Player)
@@ -112,7 +175,10 @@ def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
         )
         if not players:
             raise ValueError(f"Team {team_id} has no players; cannot simulate match {match_id}")
-        lineups.extend(players)
+        team_lineups[team_id] = players
+    home_lineup = team_lineups[match.home_team_id]
+    away_lineup = team_lineups[match.away_team_id]
+    lineups = home_lineup + away_lineup
 
     event_rates = event_rates or {}
     rates_by_player: dict[int, dict[str, float]] = {}
@@ -128,6 +194,16 @@ def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
             "Match %s: %s/%s lineup players have no trained rates; using league-average fallback",
             match_id, cold_starts, len(lineups),
         )
+
+    if get_settings().SIMULATION_CALIBRATE:
+        rates_by_player, (home_factor, away_factor) = calibrate_scoring_rates(
+            rates_by_player, home_lineup, away_lineup, sport_type, TOTAL_MINUTES[sport_type]
+        )
+        if (home_factor, away_factor) != (1.0, 1.0):
+            logger.info(
+                "Match %s: scoring calibrated to home/away league averages (home x%.3f, away x%.3f)",
+                match_id, home_factor, away_factor,
+            )
 
     player_ids = [player.id for player in lineups]
     mappings = {
@@ -256,11 +332,7 @@ async def run_simulation(
         db.commit()
         logger.info("Match %s: simulation started (%s, %s minutes)", state.match_id, state.sport_type.value, state.total_minutes)
 
-        for minute in range(1, state.total_minutes + 1):
-            if state.stop_requested:
-                logger.info("Match %s: stop requested at minute %s", state.match_id, state.current_minute)
-                break
-
+        async def play_minute(minute: int) -> None:
             state.current_minute = minute
             minute_events = _sample_minute_events(setup, minute)
 
@@ -296,6 +368,31 @@ async def run_simulation(
                     state.push_failures += 1
 
             await asyncio.sleep(speed)
+
+        for minute in range(1, state.total_minutes + 1):
+            if state.stop_requested:
+                logger.info("Match %s: stop requested at minute %s", state.match_id, state.current_minute)
+                break
+            await play_minute(minute)
+
+        # Basketball has no draws: a regulation tie goes to 10-minute overtime
+        # periods until it is broken (capped for safety).
+        if state.sport_type is SportType.BASKETBALL and not state.stop_requested:
+            minute = state.total_minutes
+            periods = 0
+            while state.home_score == state.away_score and periods < MAX_OVERTIME_PERIODS:
+                periods += 1
+                logger.info(
+                    "Match %s: tied %s-%s after %s min; overtime period %s",
+                    state.match_id, state.home_score, state.away_score, minute, periods,
+                )
+                for _ in range(OVERTIME_MINUTES):
+                    if state.stop_requested:
+                        break
+                    minute += 1
+                    await play_minute(minute)
+                if state.stop_requested:
+                    break
 
         state.status = "stopped" if state.stop_requested else "finished"
         match.status = "finished"
