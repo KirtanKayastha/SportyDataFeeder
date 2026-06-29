@@ -4,5 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.db
+*.sqlite
+nba.sqlite
 models_pkl/
 legacy_database.py.bak

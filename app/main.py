@@ -10,7 +10,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import engine
 from app.routers import events, imports, links, matches, players, predict, simulation, sports, teams
-from app.services.ml_models import load_all_models
+from app.services.ml_models import load_all_models, load_outcome_v2, load_outcome_v2_basketball
 from app.services.simulation import running_count
 
 # Schema is managed by Alembic: run `alembic upgrade head` before starting the app.
@@ -23,6 +23,11 @@ async def lifespan(app: FastAPI):
     loaded = load_all_models()
     app.state.outcome_model = loaded["outcome_model"]
     app.state.event_rates = loaded["event_rates"]
+    # outcome_v2: real-data Elo models used by /predict, per sport (football +
+    # basketball). Fall back to outcome_model/heuristic when a sport's bundle is
+    # absent.
+    app.state.outcome_v2 = load_outcome_v2()
+    app.state.outcome_v2_basketball = load_outcome_v2_basketball()
     yield
 
 
@@ -74,6 +79,8 @@ def health(request: Request):
         "simulations_running": running_count(),
         "models": {
             "outcome_model": getattr(request.app.state, "outcome_model", None) is not None,
+            "outcome_v2": getattr(request.app.state, "outcome_v2", None) is not None,
+            "outcome_v2_basketball": getattr(request.app.state, "outcome_v2_basketball", None) is not None,
             "event_rates": event_rates is not None,
             "event_rates_players": len(event_rates) if event_rates else 0,
         },

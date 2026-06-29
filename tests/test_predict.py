@@ -89,3 +89,68 @@ def test_predict_uses_loaded_model_when_present(client, match_setup):
     assert body["model_version"] == "outcome_v1_logistic"
     total = body["home_win_prob"] + body["draw_prob"] + body["away_win_prob"]
     assert total == pytest.approx(1.0)
+
+
+def test_predict_prefers_outcome_v2_for_football(client, match_setup):
+    """When an outcome_v2 bundle is loaded, football predictions use it (Elo)
+    in preference to the v1 strength model."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    # Minimal elo_logistic bundle: 1 feature (elo_diff), classes A/D/H.
+    elo_diff = [[-300], [-100], [0], [100], [300]] * 6
+    labels = ["A", "A", "D", "H", "H"] * 6
+    model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=500))])
+    model.fit(elo_diff, labels)
+    client.app.state.outcome_v2 = {
+        "kind": "elo_logistic",
+        "model": model,
+        "elo_ratings": {"Strong FC": 1800.0, "Weak FC": 1300.0},
+        "home_advantage": 65.0,
+        "base": 1500.0,
+    }
+    # Also set a v1 model to prove v2 takes precedence.
+    client.app.state.outcome_model = model
+
+    body = client.post("/predict", json={"match_id": match_setup["match_id"]}).json()
+    assert body["model_version"] == "outcome_v2_elo"
+    assert body["home_win_prob"] + body["draw_prob"] + body["away_win_prob"] == pytest.approx(1.0)
+    # Strong home (1800+65) vs weak away (1300): home win should dominate.
+    assert body["home_win_prob"] > body["away_win_prob"]
+
+
+def test_predict_uses_basketball_bundle_with_no_draw(client):
+    """A basketball match uses the basketball outcome_v2 bundle (2-class, draw=0)."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    sport_id = client.post("/sports", json={"name": "basketball"}).json()["id"]
+    home = client.post("/teams", json={"name": "MIL", "sport_id": sport_id}).json()["id"]
+    away = client.post("/teams", json={"name": "DET", "sport_id": sport_id}).json()["id"]
+    match_id = client.post(
+        "/matches",
+        json={"home_team_id": home, "away_team_id": away, "match_date": "2026-06-10T18:00:00", "sport_id": sport_id},
+    ).json()["id"]
+
+    # 2-class elo_logistic bundle (classes A/H, no draw), keyed by abbreviation.
+    elo_diff = [[-400], [-150], [150], [400]] * 8
+    labels = ["A", "A", "H", "H"] * 8
+    model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=500))])
+    model.fit(elo_diff, labels)
+    client.app.state.outcome_v2_basketball = {
+        "kind": "elo_logistic",
+        "sport": "basketball",
+        "model": model,
+        "elo_ratings": {"MIL": 1700.0, "DET": 1350.0},
+        "aliases": {},
+        "home_advantage": 100.0,
+        "base": 1500.0,
+    }
+
+    body = client.post("/predict", json={"match_id": match_id}).json()
+    assert body["model_version"] == "outcome_v2_elo"
+    assert body["draw_prob"] == pytest.approx(0.0)  # basketball has no draws
+    assert body["home_win_prob"] + body["away_win_prob"] == pytest.approx(1.0)
+    assert body["home_win_prob"] > body["away_win_prob"]  # strong home vs weak away

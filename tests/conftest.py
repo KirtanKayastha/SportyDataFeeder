@@ -36,6 +36,13 @@ def client():
     # All routes except /health, /docs and /openapi.json require the shared
     # secret (R-2.10); attach it once so every test request is authenticated.
     with TestClient(app, headers={"X-Feeder-Secret": "test-feeder-secret"}) as test_client:
+        # Isolate tests from any real pkls present in models_pkl/ on a dev
+        # machine (the lifespan loads them). Tests that need a model set it
+        # explicitly on app.state.
+        app.state.outcome_model = None
+        app.state.outcome_v2 = None
+        app.state.outcome_v2_basketball = None
+        app.state.event_rates = None
         yield test_client
 
 

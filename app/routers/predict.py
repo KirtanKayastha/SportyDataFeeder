@@ -2,12 +2,13 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.database import Match, MatchPrediction, get_db
+from app.database import Match, MatchPrediction, Sport, Team, get_db
 from app.schemas import PredictRequest, PredictResponse
 from app.services.backend_client import get_backend_client
 from app.services.features import compute_team_strength
 from app.services.links import get_sporty_uuid
-from app.services.ml_models import predict_outcome
+from app.services.ml_models import predict_outcome, predict_outcome_v2
+from app.services.sport_resolver import SportType, resolve_sport_type
 
 router = APIRouter()
 
@@ -18,11 +19,37 @@ async def predict_match_outcome(payload: PredictRequest, request: Request, db=De
     if not match:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Match {payload.match_id} not found")
 
-    home_strength = compute_team_strength(match.home_team_id, db)
-    away_strength = compute_team_strength(match.away_team_id, db)
+    # Prefer the real-data Elo model (outcome_v2) per sport (football +
+    # basketball); fall back to the v1 strength model / heuristic for other
+    # sports or when a sport's bundle is unavailable. The v2 path is cheap (Elo
+    # lookup); only the fallback needs the expensive player-form team strength
+    # (many DB reads), so compute it lazily.
+    result = None
+    sport = db.query(Sport).filter_by(id=match.sport_id).first()
+    sport_type = resolve_sport_type(sport.name if sport else None)
+    bundle = None
+    if sport_type is SportType.FOOTBALL:
+        bundle = getattr(request.app.state, "outcome_v2", None)
+    elif sport_type is SportType.BASKETBALL:
+        bundle = getattr(request.app.state, "outcome_v2_basketball", None)
 
-    model = getattr(request.app.state, "outcome_model", None)
-    result = predict_outcome(model, home_strength, away_strength)
+    if bundle is not None:
+        home_team = db.query(Team).filter_by(id=match.home_team_id).first()
+        away_team = db.query(Team).filter_by(id=match.away_team_id).first()
+        result = predict_outcome_v2(
+            bundle,
+            home_team.name if home_team else None,
+            away_team.name if away_team else None,
+        )
+
+    if result is not None:
+        home_strength = result["home_strength"]
+        away_strength = result["away_strength"]
+    else:
+        home_strength = compute_team_strength(match.home_team_id, db)
+        away_strength = compute_team_strength(match.away_team_id, db)
+        model = getattr(request.app.state, "outcome_model", None)
+        result = predict_outcome(model, home_strength, away_strength)
 
     db.add(
         MatchPrediction(
