@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.database import engine
-from app.routers import events, imports, links, matches, players, predict, simulation, sports, teams
+from app.routers import demo, events, imports, links, matches, players, predict, simulation, sports, teams
 from app.services.ml_models import load_all_models, load_outcome_v2, load_outcome_v2_basketball
 from app.services.simulation import running_count
 
@@ -59,6 +59,7 @@ app.include_router(simulation.router, tags=["Simulation"])
 app.include_router(imports.router, tags=["Imports"])
 app.include_router(links.router, tags=["Entity Links"])
 app.include_router(predict.router, tags=["Prediction"])
+app.include_router(demo.router, tags=["Demo"])
 
 
 @app.get("/health")

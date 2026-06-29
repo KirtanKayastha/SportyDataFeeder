@@ -11,6 +11,7 @@
 import asyncio
 import json
 import logging
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 
@@ -31,6 +32,17 @@ TOTAL_MINUTES = {SportType.FOOTBALL: 90, SportType.BASKETBALL: 48}
 # running 10 players for the full 48 minutes doubled the real on-court minutes
 # and inflated every basketball stat ~2x).
 LINEUP_SIZE = {SportType.FOOTBALL: 11, SportType.BASKETBALL: 5}
+
+# Demo affordance: a `featured` player's primary scoring event gets this
+# per-minute probability floor so they reliably register a stat in a single
+# simulated match (a defender/striker the dice would usually skip otherwise).
+# Applied AFTER calibration so it isn't scaled back to the league average.
+# Expected events over a match ≈ floor × total_minutes (≈2.7 goals for football),
+# which makes a goalless run for the featured player vanishingly likely.
+FEATURED_RATE_FLOOR = {
+    SportType.FOOTBALL: {"goal": 0.03},
+    SportType.BASKETBALL: {"point_2": 0.06, "point_3": 0.03},
+}
 
 # Real league HOME/AWAY scoring averages used to calibrate simulated scoring.
 # Calibrating home and away separately bakes in home advantage, so simulated
@@ -152,7 +164,37 @@ def _load_entity_uuid_map(db, entity: str, feeder_ids: list[int]) -> dict[int, s
     return {link.feeder_id: link.sporty_uuid for link in links}
 
 
-def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
+def _fold_name(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value or "")
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    lowered = stripped.lower()
+    for src, dst in (("ø", "o"), ("å", "a"), ("æ", "ae"), ("ß", "ss"), ("ł", "l"), ("đ", "d")):
+        lowered = lowered.replace(src, dst)
+    return " ".join(lowered.split())
+
+
+def _select_lineup(roster: list[Player], size: int, featured: list[str] | None) -> list[Player]:
+    """Lowest-id `size` players, except names in `featured` (case/accent-folded
+    substring match) are pulled in first — so a specific drafted player is played
+    rather than just the lowest-id 11. Mirrors the demo launcher's selection."""
+    if not featured:
+        return roster[:size]
+    wanted = [_fold_name(f) for f in featured if f.strip()]
+    chosen, seen = [], set()
+    for player in roster:
+        if any(term and term in _fold_name(player.name) for term in wanted):
+            chosen.append(player)
+            seen.add(player.id)
+    for player in roster:
+        if len(chosen) >= size:
+            break
+        if player.id not in seen:
+            chosen.append(player)
+            seen.add(player.id)
+    return chosen[:size]
+
+
+def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | None = None) -> dict:
     """Synchronous setup: lineups, per-player rates, ID mappings."""
     match = db.query(Match).filter_by(id=match_id).first()
     if not match:
@@ -166,16 +208,15 @@ def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
     lineup_size = LINEUP_SIZE[sport_type]
     team_lineups: dict[int, list[Player]] = {}
     for team_id in (match.home_team_id, match.away_team_id):
-        players = (
+        roster = (
             db.query(Player)
             .filter_by(team_id=team_id)
             .order_by(Player.id.asc())
-            .limit(lineup_size)
             .all()
         )
-        if not players:
+        if not roster:
             raise ValueError(f"Team {team_id} has no players; cannot simulate match {match_id}")
-        team_lineups[team_id] = players
+        team_lineups[team_id] = _select_lineup(roster, lineup_size, featured)
     home_lineup = team_lineups[match.home_team_id]
     away_lineup = team_lineups[match.away_team_id]
     lineups = home_lineup + away_lineup
@@ -204,6 +245,19 @@ def _prepare(db, match_id: int, event_rates: dict | None) -> dict:
                 "Match %s: scoring calibrated to home/away league averages (home x%.3f, away x%.3f)",
                 match_id, home_factor, away_factor,
             )
+
+    # Featured players get a scoring-event floor so they reliably register a
+    # stat (applied last, after calibration). Matching mirrors _select_lineup.
+    if featured:
+        wanted = [_fold_name(f) for f in featured if f.strip()]
+        floor = FEATURED_RATE_FLOOR.get(sport_type, {})
+        for player in lineups:
+            if any(term and term in _fold_name(player.name) for term in wanted):
+                rates = dict(rates_by_player[player.id])
+                for event_type, minimum in floor.items():
+                    rates[event_type] = max(rates.get(event_type, 0.0), minimum)
+                rates_by_player[player.id] = rates
+                logger.info("Match %s: featured player %s (%s) scoring boosted", match_id, player.id, player.name)
 
     player_ids = [player.id for player in lineups]
     mappings = {
@@ -316,6 +370,7 @@ async def run_simulation(
     state: SimulationState,
     event_rates: dict | None,
     client: BackendClient,
+    featured: list[str] | None = None,
 ) -> SimulationState:
     """The background simulation loop. Never raises: failures mark the state
     (and match) as error; push failures are tolerated (R-4.2)."""
@@ -323,7 +378,7 @@ async def run_simulation(
     speed = get_settings().SIMULATION_SPEED
     events_by_player: dict[int, list[str]] = {}
     try:
-        setup = _prepare(db, state.match_id, event_rates)
+        setup = _prepare(db, state.match_id, event_rates, featured)
         match = setup["match"]
         mappings = setup["mappings"]
         push_enabled = mappings["match"] is not None
@@ -434,7 +489,13 @@ async def run_simulation(
     return state
 
 
-def start_simulation(match_id: int, sport_type: SportType, event_rates: dict | None, client: BackendClient) -> SimulationState:
+def start_simulation(
+    match_id: int,
+    sport_type: SportType,
+    event_rates: dict | None,
+    client: BackendClient,
+    featured: list[str] | None = None,
+) -> SimulationState:
     """Register state and schedule the background task on the running loop."""
     state = SimulationState(
         match_id=match_id,
@@ -442,5 +503,7 @@ def start_simulation(match_id: int, sport_type: SportType, event_rates: dict | N
         total_minutes=TOTAL_MINUTES[sport_type],
     )
     _simulations[match_id] = state
-    state.task = asyncio.get_running_loop().create_task(run_simulation(state, event_rates, client))
+    state.task = asyncio.get_running_loop().create_task(
+        run_simulation(state, event_rates, client, featured)
+    )
     return state

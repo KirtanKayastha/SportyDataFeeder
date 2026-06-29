@@ -17,10 +17,17 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
 BACKOFF_BASE = 1.5
 REQUEST_TIMEOUT = 5.0
+# Orchestration calls (schedule/register/demo-setup) do several DB writes and
+# can hit a cold remote database, so they get a generous timeout.
+SETUP_TIMEOUT = 30.0
 
 MATCH_RESULT_PATH = "/api/v1/feed/match-result"
 PREDICTION_PATH = "/api/v1/feed/prediction"
 PLAYER_RATINGS_PATH = "/api/v1/feed/player-ratings"
+SCHEDULE_MATCH_PATH = "/api/v1/feed/schedule-match"
+REGISTER_PLAYERS_PATH = "/api/v1/feed/register-players"
+RESOLVE_PLAYERS_PATH = "/api/v1/feed/resolve-players"
+DEMO_SETUP_PATH = "/api/v1/feed/demo-setup"
 
 
 class BackendClient:
@@ -65,6 +72,34 @@ class BackendClient:
             url, MAX_ATTEMPTS, last_error,
         )
         return False
+
+    async def _post_json(self, path: str, payload: dict) -> dict:
+        """POST and return the parsed JSON response (single attempt; used by the
+        demo orchestration where the caller needs the response body, not just a
+        delivered/failed flag). Raises on HTTP/transport error."""
+        url = f"{self.base_url}{path}"
+        headers = {"X-Feeder-Secret": self.secret}
+        async with httpx.AsyncClient(transport=self._transport, timeout=SETUP_TIMEOUT) as client:
+            response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+    async def schedule_match(self, payload: dict) -> dict:
+        """Register a simulated fixture on the backend → returns sporty_match_id."""
+        return await self._post_json(SCHEDULE_MATCH_PATH, payload)
+
+    async def register_players(self, payload: dict) -> dict:
+        """Register the simulated lineup → returns {external_ref: sporty_player_uuid}."""
+        return await self._post_json(REGISTER_PLAYERS_PATH, payload)
+
+    async def resolve_players(self, payload: dict) -> dict:
+        """Map the simulated lineup to EXISTING backend players (the ones real
+        users drafted) → returns {external_ref: sporty_player_uuid} for matches."""
+        return await self._post_json(RESOLVE_PLAYERS_PATH, payload)
+
+    async def demo_setup(self, payload: dict) -> dict:
+        """Ensure a demo user/league/window + fantasy lineup of the given players."""
+        return await self._post_json(DEMO_SETUP_PATH, payload)
 
     async def push_match_result(self, payload: dict) -> bool:
         return await self._post(MATCH_RESULT_PATH, payload)
