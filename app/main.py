@@ -2,9 +2,10 @@
 
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 
 from app.config import get_settings
@@ -34,8 +35,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Sporty Data Feeder API", version="1.0.0", lifespan=lifespan)
 
 # R-2.10: every route requires the shared X-Feeder-Secret header except the
-# open endpoints below (health probes and interactive docs stay reachable).
-_AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json"}
+# open endpoints below (health probes, interactive docs, and the admin control
+# panel HTML — the panel's JS still sends the secret on every API call, so only
+# the static page itself is exempt, not the data routes).
+_AUTH_EXEMPT_PATHS = {"/health", "/docs", "/openapi.json", "/admin", "/admin/"}
+
+_ADMIN_HTML = Path(__file__).resolve().parent / "static" / "admin.html"
 
 
 @app.middleware("http")
@@ -60,6 +65,15 @@ app.include_router(imports.router, tags=["Imports"])
 app.include_router(links.router, tags=["Entity Links"])
 app.include_router(predict.router, tags=["Prediction"])
 app.include_router(demo.router, tags=["Demo"])
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_panel():
+    """Serve the static feeder control panel (same-origin, so no CORS and the
+    secret is entered in the UI, never baked into a build)."""
+    if not _ADMIN_HTML.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Admin panel not built")
+    return FileResponse(_ADMIN_HTML, media_type="text/html")
 
 
 @app.get("/health")

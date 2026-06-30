@@ -101,6 +101,15 @@ def running_count() -> int:
     return sum(1 for state in _simulations.values() if state.status == "running")
 
 
+def list_simulations() -> list[SimulationState]:
+    """All known simulation states (running + recently finished/stopped), most
+    recently active first. Powers the admin panel's live monitor."""
+    return sorted(
+        _simulations.values(),
+        key=lambda s: (s.status != "running", -s.match_id),
+    )
+
+
 def _fallback_rates(sport_type: SportType) -> dict[str, float]:
     if sport_type is SportType.BASKETBALL:
         return BASKETBALL_FALLBACK_RATES

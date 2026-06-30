@@ -16,6 +16,7 @@ from app.services.simulation import (
     build_match_result_payload,
     get_simulation_state,
     is_running,
+    list_simulations,
     request_stop,
     start_simulation,
 )
@@ -102,6 +103,26 @@ async def start_match_simulation(payload: SimulateStartRequest, request: Request
         status="running",
         status_url=f"/simulate/{match.id}/status",
     )
+
+
+@router.get("/simulate", response_model=list[SimulationStatusRead])
+def list_match_simulations():
+    """All simulations this process knows about (running + recently ended).
+    Drives the admin panel's live monitor without polling each match."""
+    return [
+        SimulationStatusRead(
+            match_id=state.match_id,
+            status=state.status,
+            current_minute=state.current_minute,
+            total_minutes=state.total_minutes,
+            home_score=state.home_score,
+            away_score=state.away_score,
+            events_inserted=state.events_inserted,
+            push_failures=state.push_failures,
+            error=state.error,
+        )
+        for state in list_simulations()
+    ]
 
 
 @router.get("/simulate/{match_id}/status", response_model=SimulationStatusRead)

@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sporty Feeder · Control Panel</title>
+  <style>
+    :root {
+      --bg: #0a0a0f; --card: #111117; --raise: #1d1d26; --line: rgba(255,255,255,0.08);
+      --volt: #e8fb25; --muted: #9a9aa5; --dim: #555560; --fg: #f0f0f0;
+      --danger: #ff3b30; --green: #4caf50; --orange: #ff6b00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+    }
+    a { color: var(--volt); }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
+    .label { font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); }
+    h1 { font-size: 30px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; margin: 4px 0 0; }
+    h2 { font-size: 11px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); margin: 0; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 3px; }
+    .card > header { border-bottom: 1px solid var(--line); padding: 10px 18px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .card > .body { padding: 18px; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .grow { flex: 1 1 200px; min-width: 0; }
+    input[type=text], input[type=password], select {
+      width: 100%; background: #0d0d12; border: 1px solid var(--line); border-radius: 3px;
+      color: var(--fg); padding: 9px 12px; font-size: 13px; outline: none; transition: border-color .15s;
+    }
+    input:focus, select:focus { border-color: var(--volt); }
+    button {
+      cursor: pointer; border-radius: 3px; padding: 8px 14px; font-size: 11px; font-weight: 700;
+      letter-spacing: 1.5px; text-transform: uppercase; border: 1px solid var(--line);
+      background: var(--raise); color: var(--muted); transition: all .15s;
+    }
+    button:hover { color: var(--fg); }
+    button.primary { background: var(--volt); color: #0a0a0f; border-color: transparent; }
+    button.primary:hover { background: #f0ff45; }
+    button.danger { color: var(--danger); border-color: rgba(255,59,48,.3); background: transparent; }
+    button.danger:hover { background: rgba(255,59,48,.1); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .tab { background: transparent; border-color: var(--line); }
+    .tab.active { background: rgba(232,251,37,.1); border-color: rgba(232,251,37,.4); color: var(--volt); }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding: 3px 9px; border-radius: 3px; font-size: 10px; font-weight:700; letter-spacing:1px; text-transform: uppercase; }
+    .pill.ok { background: rgba(76,175,80,.12); color: var(--green); }
+    .pill.bad { background: rgba(255,59,48,.1); color: var(--danger); }
+    .pill.live { background: rgba(255,59,48,.12); color: var(--danger); }
+    .pill.scheduled { background: rgba(255,255,255,.06); color: var(--muted); }
+    .pill.finished { background: rgba(255,255,255,.04); color: var(--dim); }
+    .pill.volt { background: rgba(232,251,37,.1); color: var(--volt); }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--dim); padding: 8px 12px; border-bottom: 1px solid var(--line); }
+    td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.04); font-size: 13px; }
+    tr.sel td { background: rgba(232,251,37,.05); }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover td { background: var(--raise); }
+    .stack > * + * { margin-top: 16px; }
+    .num { font-variant-numeric: tabular-nums; font-weight: 800; }
+    .volt { color: var(--volt); }
+    .dim { color: var(--dim); }
+    .muted { color: var(--muted); }
+    .toggle { display:flex; align-items:center; gap:8px; font-size:12px; color: var(--muted); user-select:none; }
+    .bar { height: 6px; background: var(--raise); border-radius: 999px; overflow: hidden; }
+    .bar > span { display:block; height:100%; background: var(--volt); border-radius:999px; transition: width .3s; }
+    .grid2 { display:grid; grid-template-columns: 1fr; gap: 16px; }
+    @media (min-width: 800px) { .grid2 { grid-template-columns: 1.3fr 1fr; } }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+    .toast { position: fixed; right: 16px; top: 16px; z-index: 50; display:flex; flex-direction:column; gap:8px; }
+    .toast > div { background: var(--raise); border:1px solid var(--line); border-radius:3px; padding: 10px 14px; font-size: 13px; max-width: 360px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+    .toast .t-ok { border-color: rgba(76,175,80,.5); }
+    .toast .t-err { border-color: rgba(255,59,48,.5); }
+    .empty { color: var(--dim); font-size: 13px; padding: 18px 0; text-align:center; }
+    .sim-card { border:1px solid var(--line); border-radius:3px; background:#0d0d12; padding: 14px; }
+    .sim-card.running { border-left: 3px solid var(--danger); }
+    .sim-card.finished { border-left: 3px solid var(--green); }
+  </style>
+</head>
+<body>
+  <div class="toast" id="toast"></div>
+  <div class="wrap stack">
+    <div>
+      <p class="label">Sporty Data Feeder</p>
+      <h1>Control Panel</h1>
+      <p class="dim" style="margin-top:6px">Simulate matches without curl — launch, monitor and stop from here.</p>
+    </div>
+
+    <!-- Connection -->
+    <section class="card">
+      <header><h2>Connection</h2><span id="health" class="pill scheduled">Not connected</span></header>
+      <div class="body">
+        <div class="row">
+          <div class="grow"><p class="label" style="margin-bottom:6px">Base URL (blank = same origin)</p>
+            <input id="baseUrl" type="text" placeholder="http://localhost:8010" /></div>
+          <div class="grow"><p class="label" style="margin-bottom:6px">X-Feeder-Secret</p>
+            <input id="secret" type="password" placeholder="shared secret" /></div>
+          <div style="align-self:flex-end"><button class="primary" onclick="connect()">Connect</button></div>
+        </div>
+        <p id="healthDetail" class="dim" style="margin-top:12px"></p>
+      </div>
+    </section>
+
+    <!-- Tabs -->
+    <nav class="row" style="gap:6px" id="tabs">
+      <button class="tab active" data-tab="sim" onclick="switchTab('sim')">Simulate</button>
+      <button class="tab" data-tab="data" onclick="switchTab('data')">Manage Data</button>
+    </nav>
+
+    <div id="tab-sim" class="stack">
+    <div class="grid2">
+      <!-- Matches -->
+      <section class="card">
+        <header>
+          <h2>Matches</h2>
+          <div class="row" style="gap:6px">
+            <select id="sportFilter" style="width:auto" onchange="loadMatches()">
+              <option value="">All sports</option>
+            </select>
+            <select id="statusFilter" style="width:auto" onchange="loadMatches()">
+              <option value="scheduled">Scheduled</option>
+              <option value="live">Live</option>
+              <option value="finished">Finished</option>
+              <option value="">All</option>
+            </select>
+            <button onclick="loadMatches()">↻</button>
+          </div>
+        </header>
+        <div class="body" style="padding:0; max-height: 420px; overflow:auto">
+          <table>
+            <thead><tr><th>ID</th><th>Fixture</th><th>Sport</th><th>Status</th></tr></thead>
+            <tbody id="matchRows"><tr><td colspan="4" class="empty">Connect to load matches.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Launch -->
+      <section class="card">
+        <header><h2>Launch</h2><span id="selMatch" class="dim" style="font-size:12px">No match selected</span></header>
+        <div class="body stack">
+          <div class="row" style="gap:14px">
+            <label class="toggle"><input type="checkbox" id="optFantasy" checked /> Demo fantasy team</label>
+            <label class="toggle"><input type="checkbox" id="optSimulate" checked /> Simulate now</label>
+            <label class="toggle"><input type="checkbox" id="optPrediction" checked /> Push prediction</label>
+            <label class="toggle"><input type="checkbox" id="optResolve" /> Resolve existing</label>
+          </div>
+          <div>
+            <p class="label" style="margin-bottom:6px">Featured players (comma-separated, optional)</p>
+            <input id="featured" type="text" placeholder="e.g. Kevin Durant, Jaylen Brown" />
+          </div>
+          <button class="primary" id="launchBtn" onclick="launch()" disabled>Launch demo</button>
+          <div id="launchResult"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Live monitor -->
+    <section class="card">
+      <header>
+        <h2>Live Simulations</h2>
+        <label class="toggle"><input type="checkbox" id="autoPoll" checked onchange="schedulePoll()" /> Auto-refresh</label>
+      </header>
+      <div class="body">
+        <div id="sims" class="stack"><p class="empty">No simulations yet.</p></div>
+      </div>
+    </section>
+    </div><!-- /tab-sim -->
+
+    <div id="tab-data" class="stack" hidden>
+      <div class="grid2">
+        <!-- Sports -->
+        <section class="card">
+          <header><h2>Sports</h2><button onclick="loadSports()">↻</button></header>
+          <div class="body stack">
+            <div class="row">
+              <input id="sportName" class="grow" type="text" placeholder="Sport name (e.g. football)" />
+              <button class="primary" onclick="addSport()">Add</button>
+            </div>
+            <div id="sportList"></div>
+          </div>
+        </section>
+
+        <!-- Teams -->
+        <section class="card">
+          <header><h2>Teams</h2><button onclick="loadTeams()">↻</button></header>
+          <div class="body stack">
+            <div class="row">
+              <input id="teamName" class="grow" type="text" placeholder="Team name" />
+              <select id="teamSport" style="width:auto"></select>
+              <button class="primary" onclick="addTeam()">Add</button>
+            </div>
+            <div id="teamList" style="max-height:240px; overflow:auto"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Players -->
+      <section class="card">
+        <header><h2>Players</h2>
+          <select id="playerTeamFilter" style="width:auto" onchange="loadPlayers()"><option value="">Pick a team…</option></select>
+        </header>
+        <div class="body stack">
+          <div class="row">
+            <input id="playerName" class="grow" type="text" placeholder="Player name" />
+            <input id="playerPos" type="text" placeholder="Position" style="width:120px" />
+            <button class="primary" onclick="addPlayer()">Add</button>
+          </div>
+          <div id="playerList" style="max-height:300px; overflow:auto"><p class="empty">Pick a team to list its players.</p></div>
+        </div>
+      </section>
+
+      <div class="grid2">
+        <!-- Entity Links -->
+        <section class="card">
+          <header><h2>Entity Links</h2><button onclick="loadLinks()">↻</button></header>
+          <div class="body stack">
+            <div class="row">
+              <select id="linkEntity" style="width:auto">
+                <option value="match">match</option><option value="team">team</option>
+                <option value="player">player</option><option value="sport">sport</option>
+              </select>
+              <input id="linkFeederId" type="text" placeholder="feeder id" style="width:100px" />
+              <input id="linkUuid" class="grow" type="text" placeholder="sporty uuid" />
+              <button class="primary" onclick="addLink()">Link</button>
+            </div>
+            <div id="linkList" style="max-height:240px; overflow:auto"></div>
+          </div>
+        </section>
+
+        <!-- Predict -->
+        <section class="card">
+          <header><h2>Predict Outcome</h2></header>
+          <div class="body stack">
+            <div class="row">
+              <input id="predictMatchId" class="grow" type="text" placeholder="feeder match id" />
+              <button class="primary" onclick="doPredict()">Predict</button>
+            </div>
+            <div id="predictResult"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Imports -->
+      <section class="card">
+        <header><h2>Imports</h2></header>
+        <div class="body grid2">
+          <div class="stack">
+            <p class="label">NBA roster + stats (CSV path on the feeder host)</p>
+            <input id="nbaPath" type="text" placeholder="/abs/path/nba_player_stats_2026.csv" />
+            <div class="row">
+              <input id="nbaGw" type="text" placeholder="gameweek (optional)" style="width:140px" />
+              <input id="nbaSeason" type="text" placeholder="season (optional)" style="width:140px" />
+              <button class="primary" onclick="importNba()">Import NBA</button>
+            </div>
+          </div>
+          <div class="stack">
+            <p class="label">Premier League (comma-separated CSV paths)</p>
+            <input id="plPaths" type="text" placeholder="/abs/path1.csv, /abs/path2.csv" />
+            <div class="row">
+              <input id="plGw" type="text" placeholder="gameweek (optional)" style="width:140px" />
+              <input id="plSeason" type="text" placeholder="season (optional)" style="width:140px" />
+              <button class="primary" onclick="importPl()">Import PL</button>
+            </div>
+          </div>
+        </div>
+        <div class="body" style="padding-top:0"><div id="importResult"></div></div>
+      </section>
+    </div><!-- /tab-data -->
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let teamMap = {}, sportMap = {}, selectedMatchId = null, pollTimer = null;
+
+// ---- persistence ----
+$('baseUrl').value = sessionStorage.getItem('feeder_base') || '';
+$('secret').value = sessionStorage.getItem('feeder_secret') || '';
+
+function base() { return ($('baseUrl').value || '').replace(/\/$/, ''); }
+function toast(msg, kind) {
+  const el = document.createElement('div');
+  el.className = kind === 'err' ? 't-err' : kind === 'ok' ? 't-ok' : '';
+  el.textContent = msg;
+  $('toast').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ 'X-Feeder-Secret': $('secret').value }, opts.headers || {});
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(base() + path, { ...opts, headers });
+  const text = await res.text();
+  let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!res.ok) {
+    const detail = (data && data.detail) ? data.detail : `HTTP ${res.status}`;
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+// ---- connect ----
+async function connect() {
+  sessionStorage.setItem('feeder_base', $('baseUrl').value);
+  sessionStorage.setItem('feeder_secret', $('secret').value);
+  try {
+    const h = await api('/health');
+    $('health').className = 'pill ok';
+    $('health').textContent = 'Connected';
+    const m = h.models || {};
+    $('healthDetail').innerHTML = `DB <span class="${h.database==='up'?'volt':'dim'}">${h.database}</span> · `
+      + `Sims running <span class="volt">${h.simulations_running}</span> · `
+      + `event_rates players <span class="volt">${m.event_rates_players ?? 0}</span>`;
+    await loadCatalog();
+    await loadMatches();
+    schedulePoll();
+    dataLoaded = false;
+    if (!$('tab-data').hidden) { dataLoaded = true; loadData(); }
+    toast('Connected to feeder', 'ok');
+  } catch (e) {
+    $('health').className = 'pill bad'; $('health').textContent = 'Failed';
+    $('healthDetail').textContent = e.message;
+    toast(e.message, 'err');
+  }
+}
+
+async function loadCatalog() {
+  const [teams, sports] = await Promise.all([api('/teams'), api('/sports')]);
+  teamMap = {}; sportMap = {};
+  for (const t of teams) teamMap[t.id] = t.name;
+  for (const s of sports) sportMap[s.id] = s.name;
+  const sf = $('sportFilter');
+  sf.innerHTML = '<option value="">All sports</option>' +
+    sports.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+}
+
+// ---- matches ----
+async function loadMatches() {
+  if (!$('secret').value) return;
+  const status = $('statusFilter').value;
+  const q = status ? `?status=${encodeURIComponent(status)}` : '';
+  try {
+    let matches = await api('/matches' + q);
+    const sportId = $('sportFilter').value;
+    if (sportId) matches = matches.filter(m => String(m.sport_id) === sportId);
+    const rows = matches.map(m => {
+      const sel = m.id === selectedMatchId ? ' sel' : '';
+      const st = (m.status || '').toLowerCase();
+      return `<tr class="clickable${sel}" onclick="selectMatch(${m.id}, '${(teamMap[m.home_team_id]||'?').replace(/'/g,'')}', '${(teamMap[m.away_team_id]||'?').replace(/'/g,'')}')">
+        <td class="dim">${m.id}</td>
+        <td>${teamMap[m.home_team_id] || m.home_team_id} <span class="dim">vs</span> ${teamMap[m.away_team_id] || m.away_team_id}</td>
+        <td class="muted">${sportMap[m.sport_id] || m.sport_id}</td>
+        <td><span class="pill ${st}">${st || 'scheduled'}</span></td></tr>`;
+    }).join('');
+    $('matchRows').innerHTML = rows || '<tr><td colspan="4" class="empty">No matches for this filter.</td></tr>';
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function selectMatch(id, home, away) {
+  selectedMatchId = id;
+  $('selMatch').innerHTML = `#${id} · <span class="muted">${home} vs ${away}</span>`;
+  $('launchBtn').disabled = false;
+  document.querySelectorAll('#matchRows tr').forEach(tr => tr.classList.remove('sel'));
+  loadMatches();
+}
+
+// ---- launch ----
+async function launch() {
+  if (selectedMatchId == null) return;
+  const featured = $('featured').value.split(',').map(s => s.trim()).filter(Boolean);
+  const body = {
+    match_id: selectedMatchId,
+    fantasy_demo: $('optFantasy').checked,
+    simulate: $('optSimulate').checked,
+    push_prediction: $('optPrediction').checked,
+    resolve_existing: $('optResolve').checked,
+    featured_players: featured,
+  };
+  $('launchBtn').disabled = true; $('launchBtn').textContent = 'Launching…';
+  try {
+    const r = await api('/demo/launch', { method: 'POST', body: JSON.stringify(body) });
+    const players = (r.draftable_players || []).map(p => `${p.name} <span class="dim">(${p.real_team})</span>`).join(', ');
+    $('launchResult').innerHTML = `<div class="card" style="background:#0d0d12"><div class="body stack">
+      <div class="row" style="justify-content:space-between"><span class="pill volt">${r.status}</span><span class="dim mono">${r.mode}</span></div>
+      <div><p class="label">Sporty match id</p><p class="mono">${r.sporty_match_id || '—'}</p></div>
+      <div class="row" style="gap:18px">
+        <div><p class="num volt">${r.players_linked ?? 0}</p><p class="label">Linked</p></div>
+        <div><p class="num">${r.players_in_lineup ?? 0}</p><p class="label">Lineup</p></div>
+      </div>
+      ${r.frontend_url ? `<div><p class="label">Frontend</p><p class="mono">${r.frontend_url}</p></div>` : ''}
+      ${players ? `<div><p class="label">Draftable</p><p class="muted" style="font-size:12px">${players}</p></div>` : ''}
+    </div></div>`;
+    toast(`Match ${selectedMatchId} ${r.status}`, 'ok');
+    schedulePoll();
+    loadMatches();
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    $('launchBtn').disabled = false; $('launchBtn').textContent = 'Launch demo';
+  }
+}
+
+// ---- live monitor ----
+// Returns true if any simulation is still running (drives adaptive polling:
+// the loop keeps ticking only while something is live, then stops).
+async function pollSims() {
+  if (!$('secret').value) return false;
+  let anyRunning = false;
+  try {
+    const sims = await api('/simulate');
+    anyRunning = sims.some(s => s.status === 'running');
+    if (!sims.length) { $('sims').innerHTML = '<p class="empty">No simulations yet.</p>'; }
+    else {
+      $('sims').innerHTML = sims.map(s => {
+        const pct = s.total_minutes ? Math.round(100 * s.current_minute / s.total_minutes) : 0;
+        const running = s.status === 'running';
+        return `<div class="sim-card ${running ? 'running' : 'finished'}">
+          <div class="row" style="justify-content:space-between">
+            <span class="pill ${running ? 'live' : 'finished'}">${s.status}</span>
+            <span class="dim">Match #${s.match_id}</span>
+          </div>
+          <div class="row" style="justify-content:space-between; margin-top:10px">
+            <span class="num" style="font-size:26px">${s.home_score} <span class="dim">-</span> ${s.away_score}</span>
+            <span class="muted num">${s.current_minute}'<span class="dim">/${s.total_minutes}</span></span>
+          </div>
+          <div class="bar" style="margin-top:10px"><span style="width:${pct}%"></span></div>
+          <div class="row" style="justify-content:space-between; margin-top:10px">
+            <span class="dim" style="font-size:12px">events ${s.events_inserted} · push-fail ${s.push_failures}${s.error ? ' · '+s.error : ''}</span>
+            ${running ? `<button class="danger" onclick="stopSim(${s.match_id})">Stop</button>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    }
+  } catch (e) { anyRunning = true; /* keep polling through transient errors */ }
+  return anyRunning;
+}
+
+async function stopSim(id) {
+  try { await api(`/simulate/${id}/stop`, { method: 'POST' }); toast(`Stop requested for #${id}`, 'ok'); pollSims(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+// Adaptive polling: tick ~1s WHILE a sim is running, then stop the loop once
+// nothing is live (launch/stop calls schedulePoll() to restart it). This avoids
+// hammering /simulate forever when idle, with a snappier cadence when it matters.
+const RUNNING_POLL_MS = 1000;
+let polling = false;
+
+function stopPoll() {
+  polling = false;
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+async function pollLoop() {
+  pollTimer = null;
+  const anyRunning = await pollSims();
+  if (!polling) return;                 // stopped while awaiting
+  if (anyRunning && $('autoPoll').checked) {
+    pollTimer = setTimeout(pollLoop, RUNNING_POLL_MS);
+  } else {
+    polling = false;                    // idle (or auto-refresh off) → stop
+  }
+}
+
+function schedulePoll() {
+  if (!$('secret').value) return;
+  if (!$('autoPoll').checked) { stopPoll(); pollSims(); return; }  // refresh once, no loop
+  if (polling) return;                  // already looping
+  polling = true;
+  pollLoop();
+}
+
+// ---- tabs ----
+let dataLoaded = false;
+function switchTab(name) {
+  document.querySelectorAll('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  $('tab-sim').hidden = name !== 'sim';
+  $('tab-data').hidden = name !== 'data';
+  if (name === 'data' && !dataLoaded && $('secret').value) { dataLoaded = true; loadData(); }
+}
+
+function fillSportSelects(sports) {
+  const opts = sports.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  $('teamSport').innerHTML = opts;
+}
+function fillTeamSelects(teams) {
+  const opts = '<option value="">Pick a team…</option>' +
+    teams.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+  $('playerTeamFilter').innerHTML = opts;
+}
+
+async function loadData() {
+  await Promise.all([loadSports(), loadTeams()]);
+  loadLinks();
+}
+
+function delBtn(fn, id) { return `<button class="danger" style="padding:4px 8px" onclick="${fn}(${id})">✕</button>`; }
+
+// ---- sports ----
+async function loadSports() {
+  try {
+    const sports = await api('/sports');
+    for (const s of sports) sportMap[s.id] = s.name;
+    fillSportSelects(sports);
+    $('sportList').innerHTML = `<table><tbody>${sports.map(s =>
+      `<tr><td class="dim">${s.id}</td><td>${s.name}</td><td style="text-align:right">${delBtn('delSport', s.id)}</td></tr>`).join('')}</tbody></table>`;
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function addSport() {
+  const name = $('sportName').value.trim(); if (!name) return;
+  try { await api('/sports', { method:'POST', body: JSON.stringify({ name }) }); $('sportName').value=''; toast('Sport added','ok'); loadSports(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function delSport(id) {
+  try { await api(`/sports/${id}`, { method:'DELETE' }); toast('Sport deleted','ok'); loadSports(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+// ---- teams ----
+async function loadTeams() {
+  try {
+    const teams = await api('/teams');
+    for (const t of teams) teamMap[t.id] = t.name;
+    fillTeamSelects(teams);
+    $('teamList').innerHTML = `<table><tbody>${teams.map(t =>
+      `<tr><td class="dim">${t.id}</td><td>${t.name}</td><td class="muted">${sportMap[t.sport_id]||t.sport_id}</td><td style="text-align:right">${delBtn('delTeam', t.id)}</td></tr>`).join('')}</tbody></table>`;
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function addTeam() {
+  const name = $('teamName').value.trim(); const sport_id = Number($('teamSport').value);
+  if (!name || !sport_id) { toast('Name + sport required','err'); return; }
+  try { await api('/teams', { method:'POST', body: JSON.stringify({ name, sport_id }) }); $('teamName').value=''; toast('Team added','ok'); loadTeams(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function delTeam(id) {
+  try { await api(`/teams/${id}`, { method:'DELETE' }); toast('Team deleted','ok'); loadTeams(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+// ---- players (scoped to selected team) ----
+async function loadPlayers() {
+  const teamId = $('playerTeamFilter').value;
+  if (!teamId) { $('playerList').innerHTML = '<p class="empty">Pick a team to list its players.</p>'; return; }
+  try {
+    const all = await api('/players');
+    const players = all.filter(p => String(p.team_id) === teamId);
+    $('playerList').innerHTML = players.length
+      ? `<table><thead><tr><th>ID</th><th>Name</th><th>Pos</th><th></th></tr></thead><tbody>${players.map(p =>
+          `<tr><td class="dim">${p.id}</td><td>${p.name}</td><td class="muted">${p.position||'—'}</td><td style="text-align:right">${delBtn('delPlayer', p.id)}</td></tr>`).join('')}</tbody></table>`
+      : '<p class="empty">No players for this team.</p>';
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function addPlayer() {
+  const teamId = $('playerTeamFilter').value;
+  const name = $('playerName').value.trim();
+  if (!teamId) { toast('Pick a team first','err'); return; }
+  if (!name) { toast('Name required','err'); return; }
+  const team = await api('/teams').then(ts => ts.find(t => String(t.id) === teamId)).catch(() => null);
+  const sport_id = team ? team.sport_id : null;
+  if (!sport_id) { toast('Could not resolve sport for team','err'); return; }
+  try {
+    await api('/players', { method:'POST', body: JSON.stringify({ name, team_id: Number(teamId), position: $('playerPos').value.trim() || null, sport_id }) });
+    $('playerName').value=''; $('playerPos').value=''; toast('Player added','ok'); loadPlayers();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function delPlayer(id) {
+  try { await api(`/players/${id}`, { method:'DELETE' }); toast('Player deleted','ok'); loadPlayers(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+// ---- links ----
+async function loadLinks() {
+  try {
+    const links = await api('/links');
+    $('linkList').innerHTML = links.length
+      ? `<table><thead><tr><th>Entity</th><th>Feeder ID</th><th>Sporty UUID</th></tr></thead><tbody>${links.map(l =>
+          `<tr><td><span class="pill volt">${l.feeder_entity}</span></td><td class="dim">${l.feeder_id}</td><td class="mono" style="font-size:11px">${l.sporty_uuid}</td></tr>`).join('')}</tbody></table>`
+      : '<p class="empty">No entity links yet.</p>';
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function addLink() {
+  const feeder_entity = $('linkEntity').value;
+  const feeder_id = Number($('linkFeederId').value);
+  const sporty_uuid = $('linkUuid').value.trim();
+  if (!feeder_id || !sporty_uuid) { toast('Feeder id + uuid required','err'); return; }
+  try { await api('/links', { method:'POST', body: JSON.stringify({ feeder_entity, feeder_id, sporty_uuid }) });
+    $('linkFeederId').value=''; $('linkUuid').value=''; toast('Link saved','ok'); loadLinks(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+// ---- predict ----
+async function doPredict() {
+  const match_id = Number($('predictMatchId').value); if (!match_id) return;
+  try {
+    const r = await api('/predict', { method:'POST', body: JSON.stringify({ match_id }) });
+    const bar = (label, p, color) => `<div class="row" style="gap:10px"><span class="label" style="width:48px">${label}</span>
+      <div class="bar grow"><span style="width:${Math.round(p*100)}%; background:${color}"></span></div>
+      <span class="num" style="width:42px; text-align:right">${Math.round(p*100)}%</span></div>`;
+    $('predictResult').innerHTML = `<div class="card" style="background:#0d0d12"><div class="body stack">
+      ${bar('Home', r.home_win_prob, 'var(--volt)')}${bar('Draw', r.draw_prob, 'var(--dim)')}${bar('Away', r.away_win_prob, 'var(--orange)')}
+      <p class="dim mono" style="text-align:right">${r.model_version}</p></div></div>`;
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// ---- imports ----
+async function importNba() {
+  const csv_path = $('nbaPath').value.trim(); if (!csv_path) { toast('CSV path required','err'); return; }
+  const body = { csv_path, gameweek: $('nbaGw').value ? Number($('nbaGw').value) : null, season: $('nbaSeason').value.trim() || null };
+  try { const r = await api('/imports/nba', { method:'POST', body: JSON.stringify(body) });
+    $('importResult').innerHTML = `<div class="pill ok">NBA import ${r.status}</div> <span class="dim mono">${JSON.stringify(r.result)}</span>`; toast('NBA import done','ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function importPl() {
+  const csv_paths = $('plPaths').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!csv_paths.length) { toast('At least one CSV path required','err'); return; }
+  const body = { csv_paths, gameweek: $('plGw').value ? Number($('plGw').value) : null, season: $('plSeason').value.trim() || null };
+  try { const r = await api('/imports/premier-league', { method:'POST', body: JSON.stringify(body) });
+    $('importResult').innerHTML = `<div class="pill ok">PL import ${r.status}</div> <span class="dim mono">${JSON.stringify(r.result)}</span>`; toast('PL import done','ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+// auto-connect if creds present
+if ($('secret').value) connect();
+</script>
+</body>
+</html>
