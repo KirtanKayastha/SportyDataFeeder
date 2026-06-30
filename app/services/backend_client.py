@@ -24,6 +24,7 @@ SETUP_TIMEOUT = 30.0
 MATCH_RESULT_PATH = "/api/v1/feed/match-result"
 PREDICTION_PATH = "/api/v1/feed/prediction"
 PLAYER_RATINGS_PATH = "/api/v1/feed/player-ratings"
+MATCH_LINEUPS_PATH = "/api/v1/feed/match-lineups"
 SCHEDULE_MATCH_PATH = "/api/v1/feed/schedule-match"
 REGISTER_PLAYERS_PATH = "/api/v1/feed/register-players"
 RESOLVE_PLAYERS_PATH = "/api/v1/feed/resolve-players"
@@ -109,6 +110,9 @@ class BackendClient:
 
     async def push_player_ratings(self, payload: dict) -> bool:
         return await self._post(PLAYER_RATINGS_PATH, payload)
+
+    async def push_lineups(self, payload: dict) -> bool:
+        return await self._post(MATCH_LINEUPS_PATH, payload)
 
 
 def get_backend_client() -> BackendClient:

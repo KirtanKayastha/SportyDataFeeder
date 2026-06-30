@@ -26,6 +26,9 @@
     .card > .body { padding: 18px; }
     .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
     .grow { flex: 1 1 200px; min-width: 0; }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field > .label { margin: 0; }
+    input[type=date], input[type=time], input[type=datetime-local] { color-scheme: dark; }
     input[type=text], input[type=password], select {
       width: 100%; background: #0d0d12; border: 1px solid var(--line); border-radius: 3px;
       color: var(--fg); padding: 9px 12px; font-size: 13px; outline: none; transition: border-color .15s;
@@ -109,6 +112,29 @@
     </nav>
 
     <div id="tab-sim" class="stack">
+    <!-- Schedule a match -->
+    <section class="card">
+      <header><h2>Schedule Match</h2></header>
+      <div class="body">
+        <div class="row" style="align-items:flex-end">
+          <label class="field" style="width:120px"><span class="label">Sport</span>
+            <select id="schedSport" onchange="onSchedSportChange()"></select></label>
+          <label class="field grow"><span class="label">Home Team</span>
+            <select id="schedHome"></select></label>
+          <span class="dim" style="padding-bottom:9px">vs</span>
+          <label class="field grow"><span class="label">Away Team</span>
+            <select id="schedAway"></select></label>
+          <label class="field" style="width:150px"><span class="label">Kick-off Date</span>
+            <input id="schedDate" type="date" /></label>
+          <label class="field" style="width:120px"><span class="label">Kick-off Time</span>
+            <input id="schedTime" type="time" step="60" /></label>
+          <button class="primary" onclick="scheduleMatch()">Schedule</button>
+        </div>
+        <label class="toggle" style="margin-top:12px"><input type="checkbox" id="schedPush" checked /> Show on Sporty matches page (push as upcoming)</label>
+        <p class="dim" style="margin-top:8px; font-size:12px">Pick the exact date and time of kick-off — uses your local timezone.</p>
+      </div>
+    </section>
+
     <div class="grid2">
       <!-- Matches -->
       <section class="card">
@@ -150,6 +176,7 @@
             <input id="featured" type="text" placeholder="e.g. Kevin Durant, Jaylen Brown" />
           </div>
           <button class="primary" id="launchBtn" onclick="launch()" disabled>Launch demo</button>
+          <div id="lineupsPreview"></div>
           <div id="launchResult"></div>
         </div>
       </section>
@@ -272,6 +299,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let teamMap = {}, sportMap = {}, selectedMatchId = null, pollTimer = null;
+let allTeams = [], allSports = [];
 
 // ---- persistence ----
 $('baseUrl').value = sessionStorage.getItem('feeder_base') || '';
@@ -326,12 +354,62 @@ async function connect() {
 
 async function loadCatalog() {
   const [teams, sports] = await Promise.all([api('/teams'), api('/sports')]);
+  allTeams = teams; allSports = sports;
   teamMap = {}; sportMap = {};
   for (const t of teams) teamMap[t.id] = t.name;
   for (const s of sports) sportMap[s.id] = s.name;
   const sf = $('sportFilter');
   sf.innerHTML = '<option value="">All sports</option>' +
     sports.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  initScheduleForm();
+}
+
+// ---- schedule a match ----
+function initScheduleForm() {
+  $('schedSport').innerHTML = allSports.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  // default kick-off = now (local), rounded to the minute
+  const d = new Date(); d.setSeconds(0, 0);
+  const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+  $('schedDate').value = local.slice(0, 10);   // YYYY-MM-DD
+  $('schedTime').value = local.slice(11, 16);  // HH:MM
+  onSchedSportChange();
+}
+
+function onSchedSportChange() {
+  const sportId = $('schedSport').value;
+  const teams = allTeams.filter(t => String(t.sport_id) === sportId);
+  const opts = teams.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+  $('schedHome').innerHTML = opts;
+  $('schedAway').innerHTML = opts;
+  if (teams.length > 1) $('schedAway').selectedIndex = 1;  // avoid same default
+}
+
+async function scheduleMatch() {
+  const sport_id = Number($('schedSport').value);
+  const home_team_id = Number($('schedHome').value);
+  const away_team_id = Number($('schedAway').value);
+  const dateVal = $('schedDate').value;
+  const timeVal = $('schedTime').value;
+  if (!sport_id || !home_team_id || !away_team_id) { toast('Pick sport + both teams', 'err'); return; }
+  if (home_team_id === away_team_id) { toast('Home and away must differ', 'err'); return; }
+  if (!dateVal || !timeVal) { toast('Pick a kick-off date and time', 'err'); return; }
+  const match_date = new Date(`${dateVal}T${timeVal}`).toISOString();
+  try {
+    const m = await api('/matches', { method: 'POST', body: JSON.stringify({ home_team_id, away_team_id, sport_id, match_date }) });
+    let msg = `Scheduled match #${m.id}`;
+    if ($('schedPush').checked) {
+      try {
+        const pushed = await api(`/matches/${m.id}/schedule-on-sporty`, { method: 'POST' });
+        msg += ` · on Sporty as ${pushed.sporty_match_id.slice(0, 8)}…`;
+      } catch (pe) {
+        toast(`Created, but Sporty push failed: ${pe.message}`, 'err');
+      }
+    }
+    toast(msg, 'ok');
+    $('statusFilter').value = 'scheduled';
+    $('sportFilter').value = String(sport_id);
+    await loadMatches();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 // ---- matches ----
@@ -360,8 +438,29 @@ function selectMatch(id, home, away) {
   selectedMatchId = id;
   $('selMatch').innerHTML = `#${id} · <span class="muted">${home} vs ${away}</span>`;
   $('launchBtn').disabled = false;
+  $('launchResult').innerHTML = '';
   document.querySelectorAll('#matchRows tr').forEach(tr => tr.classList.remove('sel'));
   loadMatches();
+  loadLineups(id);
+}
+
+async function loadLineups(matchId) {
+  $('lineupsPreview').innerHTML = '<p class="dim" style="font-size:12px">Loading lineups…</p>';
+  try {
+    const lu = await api(`/matches/${matchId}/lineups`);
+    const col = (side) => `<div>
+      <p class="label" style="margin-bottom:6px">${side.team_name || '—'} · ${side.players.length}</p>
+      ${side.players.map(p => `<div style="display:flex; gap:8px; padding:3px 0; font-size:13px">
+        <span class="dim" style="min-width:34px">${p.position || '—'}</span>
+        <span>${p.name}</span></div>`).join('')}
+    </div>`;
+    $('lineupsPreview').innerHTML = `<div class="card" style="background:#0d0d12"><div class="body">
+      <p class="label" style="margin-bottom:10px">Players in this simulation (${lu.lineup_size} per team)</p>
+      <div class="grid2">${col(lu.home)}${col(lu.away)}</div>
+    </div></div>`;
+  } catch (e) {
+    $('lineupsPreview').innerHTML = `<p style="font-size:12px; color:#ff3b30">Lineups: ${e.message}</p>`;
+  }
 }
 
 // ---- launch ----

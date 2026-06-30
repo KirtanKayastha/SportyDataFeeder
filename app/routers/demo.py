@@ -146,14 +146,27 @@ async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(g
         resolved = await client.register_players({"sport": sport_slug, "players": entries})
     draftable = []  # what your users can draft (or already drafted), so they score
     player_uuids: list[str] = []
+    home_uuids: list[str] = []
+    away_uuids: list[str] = []
     for p in lineup:
         sporty_player_id = resolved["players"].get(f"feeder:player:{p.id}")
         if sporty_player_id:
             upsert_link(db, "player", p.id, sporty_player_id, commit=False)
             player_uuids.append(sporty_player_id)
+            (home_uuids if p.team_id == home.id else away_uuids).append(sporty_player_id)
             draftable.append({"name": p.name, "real_team": team_name.get(p.team_id, ""),
                               "sporty_player_id": sporty_player_id})
     db.commit()
+
+    # Push the per-team starting lineups so the match page can show who's playing.
+    try:
+        await client.push_lineups({
+            "sporty_match_id": sporty_match_id,
+            "home": home_uuids,
+            "away": away_uuids,
+        })
+    except Exception as exc:  # best-effort; never block the launch
+        logger.warning("lineups push failed: %s", exc)
 
     # 3) Push the outcome prediction so the frontend prediction card populates.
     prediction = None

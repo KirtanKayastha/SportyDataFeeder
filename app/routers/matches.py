@@ -7,7 +7,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database import Event, Match, Player, Sport, Team, get_db
 from app.schemas import MatchCreate, MatchDetailRead, MatchRead
+from app.services.backend_client import get_backend_client
+from app.services.links import upsert_link
 from app.services.scoring_rules import score_events
+from app.services.simulation import LINEUP_SIZE, _select_lineup
 from app.services.sport_resolver import SportType, resolve_sport_type
 
 router = APIRouter()
@@ -104,6 +107,85 @@ def create_match(payload: MatchCreate, db=Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create match") from exc
     return match
+
+
+@router.post("/{match_id}/schedule-on-sporty")
+async def schedule_on_sporty(match_id: int, db=Depends(get_db)):
+    """Register this fixture on the Sporty backend as a *scheduled* match (so it
+    appears on the Sporty matches page as upcoming) and link it — WITHOUT
+    simulating or registering players. Idempotent: schedule_match get-or-creates
+    by fixture identity, so re-pushing returns the same Sporty match id."""
+    match = db.query(Match).filter_by(id=match_id).first()
+    if not match:
+        _not_found("Match", match_id)
+
+    sport = db.query(Sport).filter_by(id=match.sport_id).first()
+    sport_type = resolve_sport_type(sport.name if sport else None)
+    if sport_type is SportType.UNKNOWN:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown sport '{sport.name if sport else None}'",
+        )
+
+    home = db.query(Team).filter_by(id=match.home_team_id).first()
+    away = db.query(Team).filter_by(id=match.away_team_id).first()
+    if not home or not away:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Match teams not found")
+
+    client = get_backend_client()
+    schedule = await client.schedule_match(
+        {
+            "sport": sport_type.value,
+            "home_team": home.name,
+            "away_team": away.name,
+            "match_date": match.match_date.isoformat() if match.match_date else None,
+        }
+    )
+    sporty_match_id = schedule["sporty_match_id"]
+    upsert_link(db, "match", match.id, sporty_match_id)
+    return {
+        "feeder_match_id": match.id,
+        "sporty_match_id": sporty_match_id,
+        "created": schedule.get("created", True),
+    }
+
+
+def _match_lineups(db, match: Match) -> dict:
+    """The players that play in this match's simulation, per team — the same
+    deterministic selection (`_select_lineup`) the simulator uses."""
+    sport = db.query(Sport).filter_by(id=match.sport_id).first()
+    sport_type = resolve_sport_type(sport.name if sport else None)
+    size = LINEUP_SIZE.get(sport_type, 11)
+
+    def team_lineup(team_id: int) -> dict:
+        team = db.query(Team).filter_by(id=team_id).first()
+        roster = (
+            db.query(Player).filter_by(team_id=team_id).order_by(Player.id.asc()).all()
+        )
+        chosen = _select_lineup(roster, size, None)
+        return {
+            "team_id": team_id,
+            "team_name": team.name if team else None,
+            "players": [
+                {"id": p.id, "name": p.name, "position": p.position} for p in chosen
+            ],
+        }
+
+    return {
+        "match_id": match.id,
+        "lineup_size": size,
+        "home": team_lineup(match.home_team_id),
+        "away": team_lineup(match.away_team_id),
+    }
+
+
+@router.get("/{match_id}/lineups")
+def get_match_lineups(match_id: int, db=Depends(get_db)):
+    """Players playing in this match's simulation, grouped by team."""
+    match = db.query(Match).filter_by(id=match_id).first()
+    if not match:
+        _not_found("Match", match_id)
+    return _match_lineups(db, match)
 
 
 @router.get("/{match_id}", response_model=MatchDetailRead)

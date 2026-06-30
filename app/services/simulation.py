@@ -58,6 +58,21 @@ BASKETBALL_AWAY_POINTS = 102.2
 OVERTIME_MINUTES = 10
 MAX_OVERTIME_PERIODS = 6
 
+# Assists are NOT independent events — they only happen because a teammate
+# scored. So we never sample "assist" on its own; instead, when a scoring event
+# fires we credit a different teammate an assist with this probability (and not
+# every goal/basket is assisted — solo efforts exist). Rates from real data:
+# ~75% of EPL goals are assisted; ~58% of NBA made field goals are assisted
+# (free throws are never assisted, so they're excluded below).
+ASSIST_PROBABILITY = {
+    SportType.FOOTBALL: 0.75,
+    SportType.BASKETBALL: 0.58,
+}
+ASSISTABLE_EVENTS = {
+    SportType.FOOTBALL: {"goal"},
+    SportType.BASKETBALL: {"point_2", "point_3"},
+}
+
 
 @dataclass
 class SimulationState:
@@ -291,27 +306,65 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
     }
 
 
+def _pick_assister(scorer, teammates: list, rates_by_player: dict):
+    """Pick a teammate (never the scorer) to credit with the assist, weighted by
+    their assist rate so playmakers assist more often. Returns None when the
+    scorer has no teammates on the pitch/court."""
+    candidates = [p for p in teammates if p.id != scorer.id]
+    if not candidates:
+        return None
+    weights = numpy.array(
+        [max(float(rates_by_player.get(p.id, {}).get("assist", 0.0)), 1e-4) for p in candidates],
+        dtype=float,
+    )
+    probs = weights / weights.sum()
+    return candidates[int(numpy.random.choice(len(candidates), p=probs))]
+
+
 def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
-    """Bernoulli-sample each event type for each active player for one minute."""
+    """Bernoulli-sample each event type for each active player for one minute.
+
+    Assists are special: they are never sampled standalone (a real assist only
+    exists because a teammate scored). Instead, when a scoring event fires we
+    credit a different teammate an assist with ASSIST_PROBABILITY."""
+    sport_type = setup["sport_type"]
+    rates_by_player = setup["rates_by_player"]
+    assistable = ASSISTABLE_EVENTS.get(sport_type, set())
+    assist_prob = ASSIST_PROBABILITY.get(sport_type, 0.0)
+
+    teammates_by_team: dict = {}
+    for player in setup["lineups"]:
+        teammates_by_team.setdefault(player.team_id, []).append(player)
+
+    def make_event(event_type: str, player, extra=None) -> dict:
+        return {
+            "event_id": str(uuid.uuid4()),
+            "event_type": event_type,
+            "player_id": player.id,
+            "team_id": player.team_id,
+            "minute": minute,
+            "extra": extra,
+        }
+
     fired: list[dict] = []
     for player in setup["lineups"]:
-        for event_type, probability in setup["rates_by_player"][player.id].items():
+        for event_type, probability in rates_by_player[player.id].items():
+            # Assists are coupled to scoring events below — never standalone.
+            if event_type == "assist":
+                continue
             p = min(max(float(probability), 0.0), 1.0)
             if p <= 0.0 or not numpy.random.binomial(1, p):
                 continue
             extra = None
-            if event_type in BASKETBALL_POINT_VALUES and setup["sport_type"] is SportType.BASKETBALL:
+            if event_type in BASKETBALL_POINT_VALUES and sport_type is SportType.BASKETBALL:
                 extra = {"points": BASKETBALL_POINT_VALUES[event_type]}
-            fired.append(
-                {
-                    "event_id": str(uuid.uuid4()),
-                    "event_type": event_type,
-                    "player_id": player.id,
-                    "team_id": player.team_id,
-                    "minute": minute,
-                    "extra": extra,
-                }
-            )
+            fired.append(make_event(event_type, player, extra))
+
+            # A scoring event may be assisted by a teammate (not every one is).
+            if event_type in assistable and numpy.random.binomial(1, assist_prob):
+                assister = _pick_assister(player, teammates_by_team.get(player.team_id, []), rates_by_player)
+                if assister is not None:
+                    fired.append(make_event("assist", assister))
     return fired
 
 
