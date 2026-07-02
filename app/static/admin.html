@@ -155,8 +155,8 @@
         </header>
         <div class="body" style="padding:0; max-height: 420px; overflow:auto">
           <table>
-            <thead><tr><th>ID</th><th>Fixture</th><th>Sport</th><th>Status</th></tr></thead>
-            <tbody id="matchRows"><tr><td colspan="4" class="empty">Connect to load matches.</td></tr></tbody>
+            <thead><tr><th>ID</th><th>Fixture</th><th>Sport</th><th>Status</th><th></th></tr></thead>
+            <tbody id="matchRows"><tr><td colspan="5" class="empty">Connect to load matches.</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -428,9 +428,16 @@ async function loadMatches() {
         <td class="dim">${m.id}</td>
         <td>${teamMap[m.home_team_id] || m.home_team_id} <span class="dim">vs</span> ${teamMap[m.away_team_id] || m.away_team_id}</td>
         <td class="muted">${sportMap[m.sport_id] || m.sport_id}</td>
-        <td><span class="pill ${st}">${st || 'scheduled'}</span></td></tr>`;
+        <td><span class="pill ${st}">${st || 'scheduled'}</span></td>
+        <td style="text-align:right; white-space:nowrap">
+          <button style="padding:2px 8px; font-size:12px"
+            title="Remove from Sporty only — keeps the local feeder fixture so you can re-push it"
+            onclick="event.stopPropagation(); unscheduleMatch(${m.id})">Unschedule</button>
+          <button class="danger" style="padding:2px 8px; font-size:12px"
+            title="Delete this fixture from the feeder entirely (and from Sporty)"
+            onclick="event.stopPropagation(); deleteMatch(${m.id})">Delete</button></td></tr>`;
     }).join('');
-    $('matchRows').innerHTML = rows || '<tr><td colspan="4" class="empty">No matches for this filter.</td></tr>';
+    $('matchRows').innerHTML = rows || '<tr><td colspan="5" class="empty">No matches for this filter.</td></tr>';
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -442,6 +449,38 @@ function selectMatch(id, home, away) {
   document.querySelectorAll('#matchRows tr').forEach(tr => tr.classList.remove('sel'));
   loadMatches();
   loadLineups(id);
+}
+
+function _clearSelectionIf(id) {
+  if (selectedMatchId === id) {
+    selectedMatchId = null;
+    $('selMatch').textContent = 'No match selected';
+    $('launchBtn').disabled = true;
+    $('lineupsPreview').innerHTML = '';
+  }
+}
+
+// Remove from Sporty only — the local feeder fixture stays (row remains).
+async function unscheduleMatch(id) {
+  if (!confirm(`Unschedule match #${id} from Sporty?\nThis removes its fixture (and events) from the Sporty matches page but KEEPS the local feeder fixture so you can re-push it.`)) return;
+  try {
+    const res = await api(`/matches/${id}/schedule-on-sporty`, { method: 'DELETE' });
+    toast(res && res.already_absent
+      ? `Match #${id} was already gone on Sporty — link cleaned up`
+      : `Unscheduled match #${id} from Sporty`, 'ok');
+    loadMatches();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// Full delete — removes the fixture from the feeder AND from Sporty (row goes away).
+async function deleteMatch(id) {
+  if (!confirm(`Delete match #${id} from the feeder entirely?\nThis removes the local fixture (events, predictions, ratings) AND its scheduled match on Sporty. This cannot be undone.`)) return;
+  try {
+    await api(`/matches/${id}`, { method: 'DELETE' });
+    toast(`Deleted match #${id} (feeder + Sporty)`, 'ok');
+    _clearSelectionIf(id);
+    loadMatches();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 async function loadLineups(matchId) {

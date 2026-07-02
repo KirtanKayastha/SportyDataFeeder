@@ -2,15 +2,25 @@
 
 import json
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 
-from app.database import Event, Match, Player, Sport, Team, get_db
+from app.database import (
+    Event,
+    Match,
+    MatchPrediction,
+    Player,
+    PlayerMatchRating,
+    Sport,
+    Team,
+    get_db,
+)
 from app.schemas import MatchCreate, MatchDetailRead, MatchRead
 from app.services.backend_client import get_backend_client
-from app.services.links import upsert_link
+from app.services.links import delete_link, get_sporty_uuid, upsert_link
 from app.services.scoring_rules import score_events
-from app.services.simulation import LINEUP_SIZE, _select_lineup
+from app.services.simulation import LINEUP_SIZE, _select_lineup, is_running
 from app.services.sport_resolver import SportType, resolve_sport_type
 
 router = APIRouter()
@@ -147,6 +157,110 @@ async def schedule_on_sporty(match_id: int, db=Depends(get_db)):
         "feeder_match_id": match.id,
         "sporty_match_id": sporty_match_id,
         "created": schedule.get("created", True),
+    }
+
+
+@router.delete("/{match_id}/schedule-on-sporty")
+async def unschedule_on_sporty(match_id: int, db=Depends(get_db)):
+    """Delete this fixture's scheduled match on the Sporty backend and drop the
+    feeder→Sporty link. The inverse of POST /{match_id}/schedule-on-sporty.
+
+    The backend refuses to delete a match that is currently LIVE (409); a match
+    already absent on the backend (404) is treated as success and the stale link
+    is cleaned up locally."""
+    match = db.query(Match).filter_by(id=match_id).first()
+    if not match:
+        _not_found("Match", match_id)
+
+    sporty_match_id = get_sporty_uuid(db, "match", match_id)
+    if not sporty_match_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Match is not linked to a Sporty match",
+        )
+
+    client = get_backend_client()
+    try:
+        result = await client.delete_match(sporty_match_id)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == status.HTTP_404_NOT_FOUND:
+            # Already gone on the backend — drop the stale link, report success.
+            delete_link(db, "match", match_id)
+            return {
+                "feeder_match_id": match_id,
+                "sporty_match_id": sporty_match_id,
+                "deleted": True,
+                "already_absent": True,
+            }
+        detail = "Backend refused to delete the match"
+        try:
+            detail = exc.response.json().get("detail", detail)
+        except (ValueError, AttributeError):
+            pass
+        raise HTTPException(status_code=code, detail=detail) from exc
+
+    delete_link(db, "match", match_id)
+    return {
+        "feeder_match_id": match_id,
+        "sporty_match_id": sporty_match_id,
+        "deleted": True,
+        "backend": result,
+    }
+
+
+@router.delete("/{match_id}")
+async def delete_match(match_id: int, db=Depends(get_db)):
+    """Delete a feeder fixture entirely — its local events/predictions/ratings
+    and the feeder record, plus (if linked) the scheduled match on Sporty.
+
+    Refuses (409) while a simulation is running for this match, or if the linked
+    Sporty match is currently live — stop/finish it first. If the fixture is not
+    linked (or already gone on Sporty), the local delete still proceeds."""
+    match = db.query(Match).filter_by(id=match_id).first()
+    if not match:
+        _not_found("Match", match_id)
+
+    if is_running(match_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A simulation is running for this match — stop it before deleting",
+        )
+
+    # Remove the scheduled match on Sporty first so the fixture also disappears
+    # from the Sporty matches page. A 404 (already gone / unlinked) is fine; a
+    # 409 means it's live on Sporty — abort rather than half-delete.
+    sporty_match_id = get_sporty_uuid(db, "match", match_id)
+    sporty_result = None
+    if sporty_match_id:
+        try:
+            sporty_result = await get_backend_client().delete_match(sporty_match_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != status.HTTP_404_NOT_FOUND:
+                detail = "Backend refused to delete the Sporty match"
+                try:
+                    detail = exc.response.json().get("detail", detail)
+                except (ValueError, AttributeError):
+                    pass
+                raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+            sporty_result = {"deleted": True, "already_absent": True}
+        except httpx.HTTPError:
+            # Backend unreachable — proceed with the local delete regardless.
+            sporty_result = {"deleted": False, "error": "backend unreachable"}
+
+    # No ON DELETE CASCADE on these FKs, so clear children before the match row.
+    db.query(Event).filter_by(match_id=match_id).delete(synchronize_session=False)
+    db.query(MatchPrediction).filter_by(match_id=match_id).delete(synchronize_session=False)
+    db.query(PlayerMatchRating).filter_by(match_id=match_id).delete(synchronize_session=False)
+    delete_link(db, "match", match_id, commit=False)
+    db.delete(match)
+    db.commit()
+
+    return {
+        "feeder_match_id": match_id,
+        "deleted": True,
+        "sporty_match_id": sporty_match_id,
+        "sporty": sporty_result,
     }
 
 

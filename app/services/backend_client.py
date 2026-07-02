@@ -85,9 +85,25 @@ class BackendClient:
         response.raise_for_status()
         return response.json()
 
+    async def _delete_json(self, path: str) -> dict:
+        """DELETE and return the parsed JSON response. Single attempt; raises on
+        HTTP/transport error so the caller sees 404 (unknown) / 409 (live)."""
+        url = f"{self.base_url}{path}"
+        headers = {"X-Feeder-Secret": self.secret}
+        async with httpx.AsyncClient(transport=self._transport, timeout=SETUP_TIMEOUT) as client:
+            response = await client.delete(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
     async def schedule_match(self, payload: dict) -> dict:
         """Register a simulated fixture on the backend → returns sporty_match_id."""
         return await self._post_json(SCHEDULE_MATCH_PATH, payload)
+
+    async def delete_match(self, sporty_match_id: str) -> dict:
+        """Delete a scheduled match on the backend (also removes its live events
+        and cached realtime payloads). `sporty_match_id` may be the Sporty UUID
+        or the feeder external_ref. Raises on 404 (unknown) / 409 (live)."""
+        return await self._delete_json(f"{SCHEDULE_MATCH_PATH}/{sporty_match_id}")
 
     async def register_players(self, payload: dict) -> dict:
         """Register the simulated lineup → returns {external_ref: sporty_player_uuid}."""

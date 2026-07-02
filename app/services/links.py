@@ -31,3 +31,21 @@ def get_sporty_uuid(db, entity: str, feeder_id: int) -> str | None:
         .first()
     )
     return link.sporty_uuid if link else None
+
+
+def delete_link(db, entity: str, feeder_id: int, commit: bool = True) -> bool:
+    """Drop the feeder→Sporty link for an entity (e.g. after deleting the Sporty
+    match). Returns True if a link was removed."""
+    link = (
+        db.query(EntityLink)
+        .filter_by(feeder_entity=entity, feeder_id=feeder_id)
+        .first()
+    )
+    if link is None:
+        return False
+    db.delete(link)
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return True
