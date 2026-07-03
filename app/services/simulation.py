@@ -73,6 +73,28 @@ ASSISTABLE_EVENTS = {
     SportType.BASKETBALL: {"point_2", "point_3"},
 }
 
+# ── Substitutions & discipline ────────────────────────────────────────────────
+# Bench sizes mirror the real rules: EPL squads name 9 substitutes (of whom at
+# most 5 may be used); NBA rosters dress ~13 but a realistic playing rotation is
+# 9-10, i.e. the starting 5 plus ~5 bench players cycling in and out freely.
+BENCH_SIZE = {SportType.FOOTBALL: 9, SportType.BASKETBALL: 5}
+FOOTBALL_MAX_SUBS = 5
+
+# Football sub timing (per real usage): a small share are 1st-half (injury /
+# tactical emergency), a burst at half-time, and the bulk between ~55' and ~85'.
+SUB_FIRST_HALF_PROB = 0.08
+SUB_HALF_TIME_PROB = 0.25
+
+# Basketball rotation model: unlike football, players RETURN after resting.
+# NBA teams substitute at dead balls in clusters — starters play 4-8 minute
+# stints, sit a few minutes, and come back (32-36 total minutes; the bench
+# fills the rest). We approximate that with a rotation checkpoint every 4
+# simulated minutes where each team swaps 1-2 players: longest current stint
+# goes off, most-rested bench player comes on. Over 48 minutes this yields
+# ~30-40 substitution events per game and starter minutes in the mid-30s —
+# both close to real NBA box scores.
+BASKETBALL_ROTATION_INTERVAL = 4
+
 
 @dataclass
 class SimulationState:
@@ -230,7 +252,9 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
         raise ValueError(f"Unknown sport '{sport.name if sport else None}' for match {match_id}")
 
     lineup_size = LINEUP_SIZE[sport_type]
+    bench_size = BENCH_SIZE[sport_type]
     team_lineups: dict[int, list[Player]] = {}
+    bench_by_team: dict[int, list[Player]] = {}
     for team_id in (match.home_team_id, match.away_team_id):
         roster = (
             db.query(Player)
@@ -241,9 +265,12 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
         if not roster:
             raise ValueError(f"Team {team_id} has no players; cannot simulate match {match_id}")
         team_lineups[team_id] = _select_lineup(roster, lineup_size, featured)
+        starter_ids = {p.id for p in team_lineups[team_id]}
+        bench_by_team[team_id] = [p for p in roster if p.id not in starter_ids][:bench_size]
     home_lineup = team_lineups[match.home_team_id]
     away_lineup = team_lineups[match.away_team_id]
     lineups = home_lineup + away_lineup
+    bench = bench_by_team[match.home_team_id] + bench_by_team[match.away_team_id]
 
     event_rates = event_rates or {}
     rates_by_player: dict[int, dict[str, float]] = {}
@@ -260,6 +287,7 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
             match_id, cold_starts, len(lineups),
         )
 
+    home_factor = away_factor = 1.0
     if get_settings().SIMULATION_CALIBRATE:
         rates_by_player, (home_factor, away_factor) = calibrate_scoring_rates(
             rates_by_player, home_lineup, away_lineup, sport_type, TOTAL_MINUTES[sport_type]
@@ -270,20 +298,38 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
                 match_id, home_factor, away_factor,
             )
 
+    # Bench players get rates too (they may come on) and inherit their team's
+    # calibration factor so a substitute scores at the same calibrated level as
+    # the starters they replace. Calibration itself is computed on the starting
+    # lineup: the on-court/on-pitch player count never changes, so expected
+    # scoring stays at the league level.
+    scoring_events = ("goal",) if sport_type is SportType.FOOTBALL else tuple(BASKETBALL_POINT_VALUES)
+    for player in bench:
+        rates = event_rates.get(player.id) or _fallback_rates(sport_type)
+        factor = home_factor if player.team_id == match.home_team_id else away_factor
+        scaled = dict(rates)
+        for event_type in scoring_events:
+            if event_type in scaled:
+                scaled[event_type] = scaled[event_type] * factor
+        rates_by_player[player.id] = scaled
+
     # Featured players get a scoring-event floor so they reliably register a
     # stat (applied last, after calibration). Matching mirrors _select_lineup.
+    featured_ids: set[int] = set()
     if featured:
         wanted = [_fold_name(f) for f in featured if f.strip()]
         floor = FEATURED_RATE_FLOOR.get(sport_type, {})
         for player in lineups:
             if any(term and term in _fold_name(player.name) for term in wanted):
+                featured_ids.add(player.id)
                 rates = dict(rates_by_player[player.id])
                 for event_type, minimum in floor.items():
                     rates[event_type] = max(rates.get(event_type, 0.0), minimum)
                 rates_by_player[player.id] = rates
                 logger.info("Match %s: featured player %s (%s) scoring boosted", match_id, player.id, player.name)
 
-    player_ids = [player.id for player in lineups]
+    pool = lineups + bench
+    player_ids = [player.id for player in pool]
     mappings = {
         "match": _load_entity_uuid_map(db, "match", [match_id]).get(match_id),
         "teams": _load_entity_uuid_map(db, "team", [match.home_team_id, match.away_team_id]),
@@ -300,7 +346,9 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
         "match": match,
         "sport_type": sport_type,
         "lineups": lineups,
-        "player_team_map": {player.id: player.team_id for player in lineups},
+        "bench_by_team": bench_by_team,
+        "featured_ids": featured_ids,
+        "player_team_map": {player.id: player.team_id for player in pool},
         "rates_by_player": rates_by_player,
         "mappings": mappings,
     }
@@ -321,6 +369,20 @@ def _pick_assister(scorer, teammates: list, rates_by_player: dict):
     return candidates[int(numpy.random.choice(len(candidates), p=probs))]
 
 
+def _make_event(event_type: str, player, minute: int, extra=None, related_player_id=None) -> dict:
+    event = {
+        "event_id": str(uuid.uuid4()),
+        "event_type": event_type,
+        "player_id": player.id,
+        "team_id": player.team_id,
+        "minute": minute,
+        "extra": extra,
+    }
+    if related_player_id is not None:
+        event["related_player_id"] = related_player_id
+    return event
+
+
 def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
     """Bernoulli-sample each event type for each active player for one minute.
 
@@ -337,14 +399,7 @@ def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
         teammates_by_team.setdefault(player.team_id, []).append(player)
 
     def make_event(event_type: str, player, extra=None) -> dict:
-        return {
-            "event_id": str(uuid.uuid4()),
-            "event_type": event_type,
-            "player_id": player.id,
-            "team_id": player.team_id,
-            "minute": minute,
-            "extra": extra,
-        }
+        return _make_event(event_type, player, minute, extra)
 
     fired: list[dict] = []
     for player in setup["lineups"]:
@@ -368,6 +423,149 @@ def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
     return fired
 
 
+def _draw_sub_minutes(n: int, total_minutes: int) -> list[int]:
+    """Realistic football substitution minutes: a small 1st-half share
+    (injuries/tactical emergencies), a burst at half-time, and the bulk in the
+    55'-85' window."""
+    half = total_minutes // 2
+    minutes = []
+    for _ in range(n):
+        roll = numpy.random.random()
+        if roll < SUB_FIRST_HALF_PROB:
+            minutes.append(int(numpy.random.randint(20, half)))
+        elif roll < SUB_FIRST_HALF_PROB + SUB_HALF_TIME_PROB:
+            minutes.append(half + 1)
+        else:
+            minutes.append(int(numpy.random.randint(half + 10, total_minutes - 5)))
+    return sorted(minutes)
+
+
+def _setup_dynamics(setup: dict) -> dict:
+    """Mutable in-match state for substitutions and discipline: per-team bench,
+    football sub windows, basketball stint/rest clocks, yellow-card memory,
+    sent-off players and per-player minutes."""
+    sport_type = setup["sport_type"]
+    teams: dict[int, dict] = {}
+    for team_id, bench in setup["bench_by_team"].items():
+        entry: dict = {"bench": list(bench)}
+        if sport_type is SportType.FOOTBALL:
+            planned = min(FOOTBALL_MAX_SUBS, len(bench))
+            entry["sub_minutes"] = _draw_sub_minutes(planned, TOTAL_MINUTES[sport_type]) if planned else []
+        else:
+            entry["stint"] = {}
+            entry["rest"] = {}
+        teams[team_id] = entry
+    return {"teams": teams, "yellows": set(), "sent_off": set(), "minutes": {}}
+
+
+def _swap_players(setup: dict, player_off, player_on) -> None:
+    setup["lineups"].remove(player_off)
+    setup["lineups"].append(player_on)
+
+
+def _football_substitutions(setup: dict, dynamics: dict, minute: int) -> list[dict]:
+    """Execute this minute's planned subs (max 5/team). The player coming off is
+    a random outfielder — never the keeper, never a featured (demo) player, and
+    never someone already sent off; the replacement comes from the bench and
+    does NOT return (football subs are permanent)."""
+    events: list[dict] = []
+    for team_id, team in dynamics["teams"].items():
+        while team["sub_minutes"] and team["sub_minutes"][0] <= minute:
+            team["sub_minutes"].pop(0)
+            if not team["bench"]:
+                break
+            active = [p for p in setup["lineups"] if p.team_id == team_id]
+            eligible = [
+                p for p in active
+                if p.id not in setup["featured_ids"]
+                and not (p.position or "").strip().upper().startswith("G")
+            ] or [p for p in active if p.id not in setup["featured_ids"]] or active
+            if not eligible:
+                continue
+            player_off = eligible[int(numpy.random.randint(len(eligible)))]
+            player_on = team["bench"].pop(int(numpy.random.randint(len(team["bench"]))))
+            _swap_players(setup, player_off, player_on)
+            events.append(_make_event(
+                "substitution", player_on, minute,
+                extra={"player_out": player_off.id, "player_out_name": player_off.name},
+                related_player_id=player_off.id,
+            ))
+    return events
+
+
+def _basketball_rotation(setup: dict, dynamics: dict, minute: int) -> list[dict]:
+    """Rotation checkpoint (see BASKETBALL_ROTATION_INTERVAL note): each team
+    swaps 1-2 players — longest current stint off, most-rested bench player on.
+    Unlike football, players return: whoever comes off joins the bench pool."""
+    if minute <= 1 or (minute - 1) % BASKETBALL_ROTATION_INTERVAL != 0:
+        return []
+    events: list[dict] = []
+    for team_id, team in dynamics["teams"].items():
+        if not team["bench"]:
+            continue
+        swaps = int(numpy.random.randint(1, min(2, len(team["bench"])) + 1))
+        for _ in range(swaps):
+            if not team["bench"]:
+                break
+            active = [p for p in setup["lineups"] if p.team_id == team_id]
+            candidates = [p for p in active if p.id not in setup["featured_ids"]] or active
+            player_off = max(candidates, key=lambda p: (team["stint"].get(p.id, 0), -p.id))
+            player_on = max(team["bench"], key=lambda p: (team["rest"].get(p.id, 0), -p.id))
+            team["bench"].remove(player_on)
+            team["bench"].append(player_off)
+            team["stint"][player_on.id] = 0
+            team["rest"][player_off.id] = 0
+            _swap_players(setup, player_off, player_on)
+            events.append(_make_event(
+                "substitution", player_on, minute,
+                extra={"player_out": player_off.id, "player_out_name": player_off.name},
+                related_player_id=player_off.id,
+            ))
+    return events
+
+
+def _apply_discipline(setup: dict, dynamics: dict, minute_events: list[dict], minute: int) -> None:
+    """Football card rules: a second yellow to the same player becomes a red
+    card, and any red (straight or second-yellow) sends the player off — the
+    team plays on a player short, with no replacement allowed. Appends the
+    derived red-card events to minute_events and shrinks the active lineup."""
+    if setup["sport_type"] is not SportType.FOOTBALL:
+        return
+    by_id = {p.id: p for p in setup["lineups"]}
+    for event in list(minute_events):
+        pid = event["player_id"]
+        if pid in dynamics["sent_off"]:
+            continue
+        if event["event_type"] == "yellow_card":
+            if pid in dynamics["yellows"]:
+                dynamics["sent_off"].add(pid)
+                player = by_id.get(pid)
+                if player is not None:
+                    minute_events.append(_make_event(
+                        "red_card", player, minute, extra={"reason": "second_yellow"}
+                    ))
+            else:
+                dynamics["yellows"].add(pid)
+        elif event["event_type"] == "red_card":
+            dynamics["sent_off"].add(pid)
+    if dynamics["sent_off"]:
+        setup["lineups"][:] = [p for p in setup["lineups"] if p.id not in dynamics["sent_off"]]
+
+
+def _advance_clocks(setup: dict, dynamics: dict) -> None:
+    """Per-minute bookkeeping: minutes played for everyone on the pitch/court,
+    and basketball stint/rest counters that drive the rotation."""
+    for player in setup["lineups"]:
+        dynamics["minutes"][player.id] = dynamics["minutes"].get(player.id, 0) + 1
+    if setup["sport_type"] is SportType.BASKETBALL:
+        for team_id, team in dynamics["teams"].items():
+            for player in setup["lineups"]:
+                if player.team_id == team_id:
+                    team["stint"][player.id] = team["stint"].get(player.id, 0) + 1
+            for player in team["bench"]:
+                team["rest"][player.id] = team["rest"].get(player.id, 0) + 1
+
+
 def build_match_result_payload(state: SimulationState, mappings: dict, status: str, events: list[dict]) -> dict:
     return {
         "sporty_match_id": mappings["match"],
@@ -383,6 +581,9 @@ def build_match_result_payload(state: SimulationState, mappings: dict, status: s
                 "sporty_player_id": mappings["players"].get(event["player_id"]),
                 "sporty_team_id": mappings["teams"].get(event["team_id"]),
                 "minute": event["minute"],
+                # Substitutions carry the player coming OFF so the backend can
+                # publish a LINEUP_CHANGE; None (and ignored) for other events.
+                "related_sporty_player_id": mappings["players"].get(event.get("related_player_id")),
             }
             for event in events
         ],
@@ -395,7 +596,9 @@ def build_player_ratings_payload(
     ratings: dict[int, float],
     events_by_player: dict[int, list[str]],
     man_of_match: int | None,
+    minutes_by_player: dict[int, int] | None = None,
 ) -> dict:
+    minutes_by_player = minutes_by_player or {}
     return {
         "sporty_match_id": mappings["match"],
         "sport": state.sport_type.value,
@@ -406,7 +609,9 @@ def build_player_ratings_payload(
                 "rating": rating,
                 "goals": events_by_player.get(player_id, []).count("goal"),
                 "assists": events_by_player.get(player_id, []).count("assist"),
-                "minutes_played": state.current_minute,
+                # Real minutes (subs play partial matches); fall back to the
+                # full clock for pre-substitution replays.
+                "minutes_played": minutes_by_player.get(player_id, state.current_minute),
                 "events": events_by_player.get(player_id, []),
             }
             for player_id, rating in sorted(ratings.items())
@@ -444,6 +649,7 @@ async def run_simulation(
         match = setup["match"]
         mappings = setup["mappings"]
         push_enabled = mappings["match"] is not None
+        dynamics = _setup_dynamics(setup)
 
         match.status = "live"
         db.commit()
@@ -451,7 +657,16 @@ async def run_simulation(
 
         async def play_minute(minute: int) -> None:
             state.current_minute = minute
-            minute_events = _sample_minute_events(setup, minute)
+            # Substitutions happen first so players entering at minute m play
+            # minute m; then events are sampled from the post-sub lineup, and
+            # football discipline (2nd yellow -> red -> off) is applied last.
+            if state.sport_type is SportType.FOOTBALL:
+                sub_events = _football_substitutions(setup, dynamics, minute)
+            else:
+                sub_events = _basketball_rotation(setup, dynamics, minute)
+            minute_events = sub_events + _sample_minute_events(setup, minute)
+            _apply_discipline(setup, dynamics, minute_events, minute)
+            _advance_clocks(setup, dynamics)
 
             for event in minute_events:
                 db.add(
@@ -525,7 +740,10 @@ async def run_simulation(
             if not await client.push_match_result(final_payload):
                 state.push_failures += 1
             if ratings:
-                ratings_payload = build_player_ratings_payload(state, mappings, ratings, events_by_player, man_of_match)
+                ratings_payload = build_player_ratings_payload(
+                    state, mappings, ratings, events_by_player, man_of_match,
+                    minutes_by_player=dynamics["minutes"],
+                )
                 if not await client.push_player_ratings(ratings_payload):
                     state.push_failures += 1
             # The just-finished match may settle stored predictions: refresh
