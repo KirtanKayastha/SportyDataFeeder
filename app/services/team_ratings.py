@@ -54,6 +54,12 @@ class EloModel:
     home_advantage: float = 65.0  # Elo points added to the home side
     base: float = 1500.0      # rating for an unseen team
     season_regression: float = 0.25  # fraction pulled back to `base` each new season
+    # Margin-of-victory weighting of the update (None = classic result-only Elo):
+    #   "fte" — FiveThirtyEight multiplier ((margin+3)^0.8)/(7.5+0.006*winner_diff),
+    #           dampened for blowouts by favourites (autocorrelation guard). NBA.
+    #   "wfe" — World Football Elo goal-difference multiplier: 1 for a
+    #           margin <= 1, 1.5 for 2, (11+margin)/8 for >= 3. Football.
+    mov: str | None = None
     ratings: dict[str, float] = field(default_factory=dict)
     _last_season: str | None = field(default=None, repr=False)
 
@@ -72,6 +78,26 @@ class EloModel:
                 self.ratings[team] = r + self.season_regression * (self.base - r)
         self._last_season = season
 
+    def _mov_multiplier(self, fthg: int, ftag: int, home: str, away: str) -> float:
+        margin = abs(fthg - ftag)
+        if self.mov == "wfe":
+            if margin <= 1:
+                return 1.0
+            if margin == 2:
+                return 1.5
+            return (11.0 + margin) / 8.0
+        if self.mov != "fte":
+            return 1.0
+        diff = (self.rating(home) + self.home_advantage) - self.rating(away)
+        # winner_diff > 0 when the winner was the pre-match favourite; the
+        # denominator then shrinks the multiplier so favourites can't inflate
+        # their rating through expected blowouts (FiveThirtyEight NBA Elo).
+        if fthg >= ftag:
+            winner_diff = diff
+        else:
+            winner_diff = -diff
+        return ((margin + 3.0) ** 0.8) / (7.5 + 0.006 * winner_diff)
+
     def update(self, home: str, away: str, fthg: int, ftag: int, season: str) -> None:
         """Apply one finished match. Call in chronological order."""
         self._maybe_regress(season)
@@ -82,22 +108,28 @@ class EloModel:
             score_home = 0.0
         else:
             score_home = 0.5
-        delta = self.k * (score_home - exp_home)
+        delta = self.k * self._mov_multiplier(fthg, ftag, home, away) * (score_home - exp_home)
         self.ratings[home] = self.rating(home) + delta
         self.ratings[away] = self.rating(away) - delta
 
 
-def fit_elo(df, k: float = 20.0, home_advantage: float = 65.0) -> EloModel:
+def fit_elo(
+    df, k: float = 20.0, home_advantage: float = 65.0, season_regression: float = 0.25,
+    mov: str | None = None,
+) -> EloModel:
     """Process every match in chronological order and return the EloModel whose
     `ratings` reflect the state AFTER the last match — i.e. each team's current
     rating, for live prediction. Caller must pass a causally sorted frame."""
-    elo = EloModel(k=k, home_advantage=home_advantage)
+    elo = EloModel(k=k, home_advantage=home_advantage, season_regression=season_regression, mov=mov)
     for row in df.itertuples(index=False):
         elo.update(row.home, row.away, int(row.fthg), int(row.ftag), row.season)
     return elo
 
 
-def annotate_pre_match_elo(df, k: float = 20.0, home_advantage: float = 65.0):
+def annotate_pre_match_elo(
+    df, k: float = 20.0, home_advantage: float = 65.0, season_regression: float = 0.25,
+    mov: str | None = None,
+):
     """Add causal pre-match Elo columns to a chronologically sorted match frame.
 
     Returns the frame with new columns:
@@ -107,7 +139,7 @@ def annotate_pre_match_elo(df, k: float = 20.0, home_advantage: float = 65.0):
     The model is updated with each match's result only AFTER its features are
     recorded, so row t never sees its own or any later result.
     """
-    elo = EloModel(k=k, home_advantage=home_advantage)
+    elo = EloModel(k=k, home_advantage=home_advantage, season_regression=season_regression, mov=mov)
     eh, ea, ediff, eexp = [], [], [], []
     for row in df.itertuples(index=False):
         rh, ra = elo.rating(row.home), elo.rating(row.away)

@@ -528,6 +528,16 @@ async def run_simulation(
                 ratings_payload = build_player_ratings_payload(state, mappings, ratings, events_by_player, man_of_match)
                 if not await client.push_player_ratings(ratings_payload):
                     state.push_failures += 1
+            # The just-finished match may settle stored predictions: refresh
+            # the model-performance scorecard on the backend (best-effort —
+            # a failure never affects the simulation outcome).
+            try:
+                from app.services.prediction_metrics import build_metrics_push_payload
+
+                if not await client.push_model_metrics(build_metrics_push_payload(db)):
+                    state.push_failures += 1
+            except Exception:
+                logger.exception("Match %s: model-metrics push failed", state.match_id)
 
         logger.info(
             "Match %s: simulation %s at minute %s, score %s-%s, %s events, %s push failures",

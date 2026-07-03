@@ -22,8 +22,15 @@ from app.services.team_ratings import EloModel, annotate_pre_match_elo, fit_elo
 from scripts.load_nba import load_nba_games
 
 BUNDLE = Path(__file__).resolve().parents[1] / "models_pkl" / "outcome_v2_basketball.pkl"
-HOME_ADV = 100.0
+# Walk-forward tuned on the refreshed dataset (reports/OUTCOME_MODEL_BASKETBALL_V3.md):
+# margin-of-victory Elo (FiveThirtyEight multiplier) + stronger season regression
+# beat the old classic-Elo config 0.6092 vs 0.6139 pooled OOS log loss. Rest/b2b
+# features win in backtest too but need a real schedule feed at predict time, so
+# they are not part of the production bundle.
+HOME_ADV = 60.0
 K = 20.0
+SEASON_REGRESSION = 0.40
+MOV = "fte"
 
 
 def main() -> None:
@@ -31,14 +38,18 @@ def main() -> None:
     seasons = list(dict.fromkeys(df["season"]))
 
     # Fit logistic on causal pre-match elo_diff over all games...
-    annotated = annotate_pre_match_elo(df, k=K, home_advantage=HOME_ADV)
+    annotated = annotate_pre_match_elo(
+        df, k=K, home_advantage=HOME_ADV, season_regression=SEASON_REGRESSION, mov=MOV
+    )
     model = Pipeline([("scaler", StandardScaler()),
                       ("clf", LogisticRegression(max_iter=1000))])
     model.fit(annotated[["elo_diff"]].values, annotated["ftr"].values)
 
     # ...and capture CURRENT Elo ratings (keyed by team_id), then re-key by the
     # franchise's current abbreviation, which is what the app stores.
-    elo: EloModel = fit_elo(df, k=K, home_advantage=HOME_ADV)
+    elo: EloModel = fit_elo(
+        df, k=K, home_advantage=HOME_ADV, season_regression=SEASON_REGRESSION, mov=MOV
+    )
     abbr_by_id = dict(zip(df["home"], df["home_abbr"]))
     abbr_by_id.update(dict(zip(df["away"], df["away_abbr"])))
     elo_ratings = {abbr_by_id[tid]: r for tid, r in elo.ratings.items() if tid in abbr_by_id}

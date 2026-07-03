@@ -161,13 +161,14 @@ async def schedule_on_sporty(match_id: int, db=Depends(get_db)):
 
 
 @router.delete("/{match_id}/schedule-on-sporty")
-async def unschedule_on_sporty(match_id: int, db=Depends(get_db)):
+async def unschedule_on_sporty(match_id: int, force: bool = False, db=Depends(get_db)):
     """Delete this fixture's scheduled match on the Sporty backend and drop the
     feeder→Sporty link. The inverse of POST /{match_id}/schedule-on-sporty.
 
-    The backend refuses to delete a match that is currently LIVE (409); a match
-    already absent on the backend (404) is treated as success and the stale link
-    is cleaned up locally."""
+    The backend refuses to delete a match that is currently LIVE (409) unless
+    `force=true` (to clear a simulation orphaned in `live`); a match already
+    absent on the backend (404) is treated as success and the stale link is
+    cleaned up locally."""
     match = db.query(Match).filter_by(id=match_id).first()
     if not match:
         _not_found("Match", match_id)
@@ -181,7 +182,7 @@ async def unschedule_on_sporty(match_id: int, db=Depends(get_db)):
 
     client = get_backend_client()
     try:
-        result = await client.delete_match(sporty_match_id)
+        result = await client.delete_match(sporty_match_id, force=force)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code == status.HTTP_404_NOT_FOUND:
@@ -210,31 +211,34 @@ async def unschedule_on_sporty(match_id: int, db=Depends(get_db)):
 
 
 @router.delete("/{match_id}")
-async def delete_match(match_id: int, db=Depends(get_db)):
+async def delete_match(match_id: int, force: bool = False, db=Depends(get_db)):
     """Delete a feeder fixture entirely — its local events/predictions/ratings
     and the feeder record, plus (if linked) the scheduled match on Sporty.
 
     Refuses (409) while a simulation is running for this match, or if the linked
-    Sporty match is currently live — stop/finish it first. If the fixture is not
-    linked (or already gone on Sporty), the local delete still proceeds."""
+    Sporty match is currently live — stop/finish it first. Pass `force=true` to
+    override both guards and clean up a fixture whose simulation is orphaned/stuck
+    (e.g. the feeder died mid-run). If the fixture is not linked (or already gone
+    on Sporty), the local delete still proceeds."""
     match = db.query(Match).filter_by(id=match_id).first()
     if not match:
         _not_found("Match", match_id)
 
-    if is_running(match_id):
+    if is_running(match_id) and not force:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A simulation is running for this match — stop it before deleting",
+            detail="A simulation is running for this match — stop it, or pass force=true to override",
         )
 
     # Remove the scheduled match on Sporty first so the fixture also disappears
     # from the Sporty matches page. A 404 (already gone / unlinked) is fine; a
-    # 409 means it's live on Sporty — abort rather than half-delete.
+    # 409 means it's live on Sporty — abort rather than half-delete (unless
+    # force, in which case the backend override already prevented the 409).
     sporty_match_id = get_sporty_uuid(db, "match", match_id)
     sporty_result = None
     if sporty_match_id:
         try:
-            sporty_result = await get_backend_client().delete_match(sporty_match_id)
+            sporty_result = await get_backend_client().delete_match(sporty_match_id, force=force)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != status.HTTP_404_NOT_FOUND:
                 detail = "Backend refused to delete the Sporty match"

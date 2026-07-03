@@ -17,8 +17,7 @@ from app.services.simulation import running_count
 # Schema is managed by Alembic: run `alembic upgrade head` before starting the app.
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _load_models_into_state(app: FastAPI) -> None:
     # Missing pkl files only WARN (inside load_all_models); the app boots
     # regardless and /predict falls back to heuristics (PRD R-3.4).
     loaded = load_all_models()
@@ -29,6 +28,11 @@ async def lifespan(app: FastAPI):
     # absent.
     app.state.outcome_v2 = load_outcome_v2()
     app.state.outcome_v2_basketball = load_outcome_v2_basketball()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_models_into_state(app)
     yield
 
 
@@ -76,6 +80,29 @@ def admin_panel():
     return FileResponse(_ADMIN_HTML, media_type="text/html")
 
 
+@app.post("/models/reload")
+def reload_models(request: Request):
+    """Re-read every pkl from models_pkl/ into app.state without a restart, so
+    scripts/refresh_bundles.py (cron) can rebuild bundles and hot-swap them
+    (step 4 of reports/MODEL_IMPROVEMENT_PLAN.md). Auth middleware applies."""
+    _load_models_into_state(request.app)
+    return {
+        "reloaded": True,
+        "models": _models_status(request),
+    }
+
+
+def _models_status(request: Request) -> dict:
+    event_rates = getattr(request.app.state, "event_rates", None)
+    return {
+        "outcome_model": getattr(request.app.state, "outcome_model", None) is not None,
+        "outcome_v2": getattr(request.app.state, "outcome_v2", None) is not None,
+        "outcome_v2_basketball": getattr(request.app.state, "outcome_v2_basketball", None) is not None,
+        "event_rates": event_rates is not None,
+        "event_rates_players": len(event_rates) if event_rates else 0,
+    }
+
+
 @app.get("/health")
 def health(request: Request):
     try:
@@ -87,16 +114,9 @@ def health(request: Request):
             detail=f"Database connection failed: {exc}",
         ) from exc
 
-    event_rates = getattr(request.app.state, "event_rates", None)
     return {
         "status": "ok",
         "database": "up",
         "simulations_running": running_count(),
-        "models": {
-            "outcome_model": getattr(request.app.state, "outcome_model", None) is not None,
-            "outcome_v2": getattr(request.app.state, "outcome_v2", None) is not None,
-            "outcome_v2_basketball": getattr(request.app.state, "outcome_v2_basketball", None) is not None,
-            "event_rates": event_rates is not None,
-            "event_rates_players": len(event_rates) if event_rates else 0,
-        },
+        "models": _models_status(request),
     }

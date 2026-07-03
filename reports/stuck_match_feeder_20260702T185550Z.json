@@ -1,0 +1,230 @@
+{
+  "match": {
+    "id": 35,
+    "home_team_id": 29,
+    "away_team_id": 30,
+    "match_date": "2026-06-28 00:00:00",
+    "status": "live",
+    "sport_id": 2
+  },
+  "events": [
+    {
+      "id": 4988,
+      "event_id": "b8ee5581-d421-42e7-9fb1-79c5f087b698",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 155,
+      "minute": 1,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:18.995798"
+    },
+    {
+      "id": 4982,
+      "event_id": "56e8ba87-1530-48ed-b539-9e4507373e27",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 109,
+      "minute": 1,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:18.415674"
+    },
+    {
+      "id": 4983,
+      "event_id": "8572d4a4-5221-410d-95c3-197a9e6cbd09",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 136,
+      "minute": 1,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:18.415680"
+    },
+    {
+      "id": 4984,
+      "event_id": "2e49f1e5-f625-4a95-a954-103f41b08252",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 144,
+      "minute": 1,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:18.995790"
+    },
+    {
+      "id": 4985,
+      "event_id": "78812115-536c-437b-85f5-f6f79a93fb1a",
+      "match_id": 35,
+      "event_type": "assist",
+      "player_id": 109,
+      "minute": 1,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:18.995795"
+    },
+    {
+      "id": 4986,
+      "event_id": "c3447f00-9b0d-4240-94e5-2bf34fcfb594",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 155,
+      "minute": 1,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:18.995797"
+    },
+    {
+      "id": 4987,
+      "event_id": "f709eb91-6f97-4d9f-8284-ffe92ee96549",
+      "match_id": 35,
+      "event_type": "assist",
+      "player_id": 136,
+      "minute": 1,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:18.995798"
+    },
+    {
+      "id": 4989,
+      "event_id": "a5c131ef-09b2-464a-83dc-1c790ee697ee",
+      "match_id": 35,
+      "event_type": "free_throw",
+      "player_id": 119,
+      "minute": 1,
+      "extra": "{\"points\": 1}",
+      "created_at": "2026-07-02 18:46:18.995799"
+    },
+    {
+      "id": 4990,
+      "event_id": "300daa10-021a-4796-b652-d8989d509dcd",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 119,
+      "minute": 1,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:18.995800"
+    },
+    {
+      "id": 4991,
+      "event_id": "3260722f-7d05-4421-b9d6-baba6099028c",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 144,
+      "minute": 3,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:27.735775"
+    },
+    {
+      "id": 4992,
+      "event_id": "d1a06d95-c1fe-40eb-b7f1-11dc4e022c58",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 109,
+      "minute": 4,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:32.739829"
+    },
+    {
+      "id": 4993,
+      "event_id": "6d8262b7-60ee-409f-ac3f-59732a746810",
+      "match_id": 35,
+      "event_type": "assist",
+      "player_id": 155,
+      "minute": 4,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:33.285942"
+    },
+    {
+      "id": 4994,
+      "event_id": "1bbb8cd6-08af-4d48-99b0-acc232ed4809",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 136,
+      "minute": 4,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:33.285950"
+    },
+    {
+      "id": 4995,
+      "event_id": "0894abea-4db1-4127-adaf-c58af1992a03",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 155,
+      "minute": 4,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:33.285954"
+    },
+    {
+      "id": 4996,
+      "event_id": "af9557bc-5f5b-4457-9a54-0b3369f30512",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 119,
+      "minute": 4,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:33.285957"
+    },
+    {
+      "id": 4997,
+      "event_id": "2e159399-bff6-4d91-b079-64009cd21829",
+      "match_id": 35,
+      "event_type": "assist",
+      "player_id": 129,
+      "minute": 4,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:33.285962"
+    },
+    {
+      "id": 4998,
+      "event_id": "6e13169e-b9b1-436d-bcd6-77ac5766d24e",
+      "match_id": 35,
+      "event_type": "free_throw",
+      "player_id": 119,
+      "minute": 4,
+      "extra": "{\"points\": 1}",
+      "created_at": "2026-07-02 18:46:33.285966"
+    },
+    {
+      "id": 4999,
+      "event_id": "ee975a96-4b9a-489f-9b07-ba26fba95f97",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 161,
+      "minute": 4,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:33.285971"
+    },
+    {
+      "id": 5000,
+      "event_id": "b193fd84-6f65-4b4b-b0eb-8874a93516e8",
+      "match_id": 35,
+      "event_type": "free_throw",
+      "player_id": 129,
+      "minute": 5,
+      "extra": "{\"points\": 1}",
+      "created_at": "2026-07-02 18:46:37.877936"
+    },
+    {
+      "id": 5001,
+      "event_id": "b74d982f-b8f3-4378-abc2-4ec6cfaf7e43",
+      "match_id": 35,
+      "event_type": "point_2",
+      "player_id": 161,
+      "minute": 5,
+      "extra": "{\"points\": 2}",
+      "created_at": "2026-07-02 18:46:38.472448"
+    },
+    {
+      "id": 5002,
+      "event_id": "70558005-25a4-47fa-904e-27d46ae2d7c1",
+      "match_id": 35,
+      "event_type": "rebound",
+      "player_id": 161,
+      "minute": 5,
+      "extra": null,
+      "created_at": "2026-07-02 18:46:38.472454"
+    }
+  ],
+  "predictions": [],
+  "ratings": [],
+  "link": {
+    "id": 364,
+    "feeder_entity": "match",
+    "feeder_id": 35,
+    "sporty_uuid": "d826bd9c-b6ba-46bb-8e4a-d0c17117931e"
+  }
+}

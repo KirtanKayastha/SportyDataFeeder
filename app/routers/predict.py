@@ -8,9 +8,29 @@ from app.services.backend_client import get_backend_client
 from app.services.features import compute_team_strength
 from app.services.links import get_sporty_uuid
 from app.services.ml_models import predict_outcome, predict_outcome_v2
+from app.services.prediction_metrics import build_metrics_push_payload, compute_prediction_metrics
 from app.services.sport_resolver import SportType, resolve_sport_type
 
 router = APIRouter()
+
+
+@router.get("/predict/metrics")
+def prediction_metrics(db=Depends(get_db)):
+    """Score every stored prediction whose match has since finished: accuracy,
+    log loss, Brier and a calibration table per model_version. Production's
+    continuous backtest (step 4 of reports/MODEL_IMPROVEMENT_PLAN.md)."""
+    return compute_prediction_metrics(db)
+
+
+@router.post("/predict/metrics/push")
+async def push_prediction_metrics(db=Depends(get_db)):
+    """Compute the metrics scorecard and push it to the Sporty backend
+    (POST /api/v1/feed/model-metrics) for the frontend's model panel. The
+    simulation also pushes automatically when a match finishes; this endpoint
+    is the manual/replay trigger."""
+    payload = build_metrics_push_payload(db)
+    pushed = await get_backend_client().push_model_metrics(payload)
+    return {"pushed": pushed, "metrics": payload}
 
 
 @router.post("/predict", response_model=PredictResponse)

@@ -23,6 +23,7 @@ SETUP_TIMEOUT = 30.0
 
 MATCH_RESULT_PATH = "/api/v1/feed/match-result"
 PREDICTION_PATH = "/api/v1/feed/prediction"
+MODEL_METRICS_PATH = "/api/v1/feed/model-metrics"
 PLAYER_RATINGS_PATH = "/api/v1/feed/player-ratings"
 MATCH_LINEUPS_PATH = "/api/v1/feed/match-lineups"
 SCHEDULE_MATCH_PATH = "/api/v1/feed/schedule-match"
@@ -99,11 +100,14 @@ class BackendClient:
         """Register a simulated fixture on the backend → returns sporty_match_id."""
         return await self._post_json(SCHEDULE_MATCH_PATH, payload)
 
-    async def delete_match(self, sporty_match_id: str) -> dict:
+    async def delete_match(self, sporty_match_id: str, force: bool = False) -> dict:
         """Delete a scheduled match on the backend (also removes its live events
         and cached realtime payloads). `sporty_match_id` may be the Sporty UUID
-        or the feeder external_ref. Raises on 404 (unknown) / 409 (live)."""
-        return await self._delete_json(f"{SCHEDULE_MATCH_PATH}/{sporty_match_id}")
+        or the feeder external_ref. Raises on 404 (unknown); raises 409 for a
+        LIVE match unless `force=True`, which overrides the guard (for cleaning
+        up a simulation orphaned in `live`)."""
+        suffix = "?force=true" if force else ""
+        return await self._delete_json(f"{SCHEDULE_MATCH_PATH}/{sporty_match_id}{suffix}")
 
     async def register_players(self, payload: dict) -> dict:
         """Register the simulated lineup → returns {external_ref: sporty_player_uuid}."""
@@ -123,6 +127,11 @@ class BackendClient:
 
     async def push_prediction(self, payload: dict) -> bool:
         return await self._post(PREDICTION_PATH, payload)
+
+    async def push_model_metrics(self, payload: dict) -> bool:
+        """Push the /predict/metrics scorecard (model accuracy vs actual
+        results) so the backend/frontend can display model performance."""
+        return await self._post(MODEL_METRICS_PATH, payload)
 
     async def push_player_ratings(self, payload: dict) -> bool:
         return await self._post(PLAYER_RATINGS_PATH, payload)

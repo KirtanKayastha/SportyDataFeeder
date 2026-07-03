@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_VERSION = "outcome_v1_logistic"
 MODEL_VERSION_V2 = "outcome_v2_elo"
+MODEL_VERSION_V4 = "outcome_v4_elo_sot"  # MOV Elo + shots-on-target form (football)
 MODELS_DIR = Path("models_pkl")
 OUTCOME_MODEL_FILE = "outcome_model.pkl"
 OUTCOME_V2_FILE = "outcome_v2.pkl"                       # football Elo bundle
@@ -72,8 +73,11 @@ def predict_outcome_v2(bundle, home_team: str | None, away_team: str | None) -> 
     if the bundle is missing/incompatible so the caller can fall back to v1.
 
     The bundle (built by scripts/finalize_outcome_v2.py) holds:
-      kind='elo_logistic', model (sklearn Pipeline on [elo_diff]),
-      elo_ratings {canonical_team_name: rating}, home_advantage, base.
+      kind='elo_logistic', model (sklearn Pipeline on the `features` list —
+      ['elo_diff'] classic, or ['elo_diff', 'sot_net_diff'] for the v4 football
+      bundle whose per-team shots-on-target form is baked in as `sot_form`),
+      elo_ratings {canonical_team_name: rating}, home_advantage, base,
+      optional model_version.
     """
     if not bundle or bundle.get("kind") != "elo_logistic" or "elo_ratings" not in bundle:
         return None
@@ -96,14 +100,28 @@ def predict_outcome_v2(bundle, home_team: str | None, away_team: str | None) -> 
     ra = ratings.get(away, base)
     elo_diff = (rh + home_adv) - ra
 
+    # Assemble the model's input row from the bundle's feature list (older
+    # bundles carry no list -> the classic single elo_diff). An unrecognised
+    # feature means an incompatible/newer bundle: fall back rather than guess.
+    row = []
+    for feature in bundle.get("features", ["elo_diff"]):
+        if feature == "elo_diff":
+            row.append(elo_diff)
+        elif feature == "sot_net_diff":
+            sot_form = bundle.get("sot_form", {})
+            # .get default 0.0 == league-average net form (unknown/cold team)
+            row.append(sot_form.get(home, 0.0) - sot_form.get(away, 0.0))
+        else:
+            return None
+
     model = bundle["model"]
-    proba = model.predict_proba([[elo_diff]])[0]
+    proba = model.predict_proba([row])[0]
     by_class = {str(label): float(prob) for label, prob in zip(model.classes_, proba)}
     return {
         "home_win_prob": by_class.get("H", 0.0),
         "draw_prob": by_class.get("D", 0.0),
         "away_win_prob": by_class.get("A", 0.0),
-        "model_version": MODEL_VERSION_V2,
+        "model_version": bundle.get("model_version", MODEL_VERSION_V2),
         "elo_diff": elo_diff,
         "home_known": home in ratings,
         "away_known": away in ratings,

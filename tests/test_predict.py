@@ -120,6 +120,49 @@ def test_predict_prefers_outcome_v2_for_football(client, match_setup):
     assert body["home_win_prob"] > body["away_win_prob"]
 
 
+def test_predict_v4_bundle_uses_sot_feature(client, match_setup):
+    """A v4 football bundle (features=[elo_diff, sot_net_diff] + sot_form)
+    assembles both features at predict time and reports its own version."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    X = [[-300, -2.0], [-100, -1.0], [0, 0.0], [100, 1.0], [300, 2.0]] * 6
+    labels = ["A", "A", "D", "H", "H"] * 6
+    model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=500))])
+    model.fit(X, labels)
+    client.app.state.outcome_v2 = {
+        "kind": "elo_logistic",
+        "model": model,
+        "features": ["elo_diff", "sot_net_diff"],
+        "elo_ratings": {"Strong FC": 1800.0, "Weak FC": 1300.0},
+        "sot_form": {"Strong FC": 2.5, "Weak FC": -1.5},
+        "home_advantage": 65.0,
+        "base": 1500.0,
+        "model_version": "outcome_v4_elo_sot",
+    }
+
+    body = client.post("/predict", json={"match_id": match_setup["match_id"]}).json()
+    assert body["model_version"] == "outcome_v4_elo_sot"
+    assert body["home_win_prob"] + body["draw_prob"] + body["away_win_prob"] == pytest.approx(1.0)
+    assert body["home_win_prob"] > body["away_win_prob"]
+
+
+def test_predict_unknown_bundle_feature_falls_back_to_v1(client, match_setup):
+    """A bundle declaring a feature this build can't compute is skipped in
+    favour of the v1 path instead of guessing."""
+    client.app.state.outcome_v2 = {
+        "kind": "elo_logistic",
+        "model": object(),
+        "features": ["elo_diff", "some_future_feature"],
+        "elo_ratings": {"Strong FC": 1800.0},
+        "home_advantage": 65.0,
+        "base": 1500.0,
+    }
+    body = client.post("/predict", json={"match_id": match_setup["match_id"]}).json()
+    assert body["model_version"] == "heuristic_v1"  # no v1 model loaded in tests
+
+
 def test_predict_uses_basketball_bundle_with_no_draw(client):
     """A basketball match uses the basketball outcome_v2 bundle (2-class, draw=0)."""
     from sklearn.linear_model import LogisticRegression

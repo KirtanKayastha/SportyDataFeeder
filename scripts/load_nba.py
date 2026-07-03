@@ -19,6 +19,9 @@ from pathlib import Path
 import pandas as pd
 
 NBA_DB = Path(__file__).resolve().parents[1] / "nba.sqlite"
+# Seasons newer than the Kaggle dump (ends 2022-23), fetched from
+# basketball-reference by scripts/fetch_nba_recent.py. Appended when present.
+RECENT_CSV = Path(__file__).resolve().parents[1] / "historical-datas" / "nba_recent_games.csv"
 # Start after the messy 2002-2004 relocations (Charlotte/New Orleans team_id
 # reuse) so franchise identity is clean; still ~19 seasons of data.
 SINCE = "2004-10-01"
@@ -67,6 +70,15 @@ def load_nba_games(db_path: Path | None = None, since: str = SINCE) -> pd.DataFr
         "ftag": g["pts_away"].astype(int),
         "ftr": g["wl_home"].map({"W": "H", "L": "A"}),
     })
+
+    # Append post-dump seasons (same tidy schema, same franchise team_id keys).
+    # Guarded by date so a stale/overlapping CSV can never duplicate dump rows.
+    if RECENT_CSV.exists():
+        recent = pd.read_csv(RECENT_CSV, dtype={"home": str, "away": str})
+        recent["date"] = pd.to_datetime(recent["date"])
+        recent = recent[recent["date"] > out["date"].max()]
+        out = pd.concat([out, recent], ignore_index=True)
+
     out = out.sort_values(["date", "home"], kind="mergesort").reset_index(drop=True)
     return out
 

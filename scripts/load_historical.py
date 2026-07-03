@@ -35,15 +35,22 @@ def _season_label(d: pd.Timestamp) -> str:
     return f"{start}-{str(start + 1)[-2:]}"
 
 
-def load_matches(hist_dir: Path | None = None) -> pd.DataFrame:
+def load_matches(hist_dir: Path | None = None, include_championship: bool = False) -> pd.DataFrame:
     """Return all real EPL matches as one causally sorted DataFrame.
 
-    Columns: date, season, home, away, fthg, ftag, ftr (+ stats/odds when present).
-    Rows with missing date or result are dropped. Sorted by date then a stable
-    within-day order so feature construction is strictly causal.
+    Columns: date, season, home, away, fthg, ftag, ftr, Div (+ stats/odds when
+    present). Rows with missing date or result are dropped. Sorted by date then
+    a stable within-day order so feature construction is strictly causal.
+
+    include_championship=True also pools the E1 season files fetched by
+    scripts/fetch_championship.py (historical-datas/championship/) so Elo and
+    form carry across promotion/relegation; filter on Div == "E0" for the
+    EPL-only view.
     """
     hist_dir = Path(hist_dir) if hist_dir else HIST_DIR
     files = sorted(hist_dir.glob("*.csv"))
+    if include_championship:
+        files += sorted((hist_dir / "championship").glob("*.csv"))
     if not files:
         raise FileNotFoundError(f"No CSVs found in {hist_dir}")
 
