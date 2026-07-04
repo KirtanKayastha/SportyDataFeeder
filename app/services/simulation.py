@@ -655,6 +655,15 @@ async def run_simulation(
         db.commit()
         logger.info("Match %s: simulation started (%s, %s minutes)", state.match_id, state.sport_type.value, state.total_minutes)
 
+        # Push the kickoff status change immediately, before any events exist —
+        # otherwise Sporty stays "scheduled" until whichever minute first
+        # produces an event, since the per-minute push below is gated on
+        # minute_events being non-empty.
+        if push_enabled:
+            kickoff_payload = build_match_result_payload(state, mappings, "live", [])
+            if not await client.push_match_result(kickoff_payload):
+                state.push_failures += 1
+
         async def play_minute(minute: int) -> None:
             state.current_minute = minute
             # Substitutions happen first so players entering at minute m play
