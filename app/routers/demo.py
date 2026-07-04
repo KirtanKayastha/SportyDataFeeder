@@ -19,7 +19,7 @@ from app.database import Match, Player, Sport, Team, get_db
 from app.services.backend_client import get_backend_client
 from app.services.links import upsert_link
 from app.services.ml_models import predict_outcome_v2
-from app.services.simulation import LINEUP_SIZE, is_running, start_simulation
+from app.services.simulation import BENCH_SIZE, LINEUP_SIZE, is_running, start_simulation
 from app.services.sport_resolver import SportType, resolve_sport_type
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,15 @@ def _lineup(db, team_id: int, sport_type: SportType, featured: list[str] | None 
     return chosen[:size]
 
 
+def _bench(db, team_id: int, sport_type: SportType, starter_ids: set[int]) -> list[Player]:
+    """Same roster/ordering/exclusion as simulation.py::_prepare's
+    bench_by_team, so the bench players linked here are exactly the ones the
+    simulator will later treat as bench and may bring on mid-match."""
+    size = BENCH_SIZE[sport_type]
+    roster = db.query(Player).filter_by(team_id=team_id).order_by(Player.id.asc()).all()
+    return [p for p in roster if p.id not in starter_ids][:size]
+
+
 @router.post("/demo/launch")
 async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(get_db)):
     match = db.query(Match).filter_by(id=payload.match_id).first()
@@ -125,9 +134,15 @@ async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(g
     #      - register (default): CREATE feeder-owned players (throwaway demos).
     #      - resolve_existing:   map onto EXISTING players your users drafted, by
     #        name (no rows created); only matched players will score.
-    lineup = (
-        _lineup(db, home.id, sport_type, payload.featured_players)
-        + _lineup(db, away.id, sport_type, payload.featured_players)
+    home_lineup = _lineup(db, home.id, sport_type, payload.featured_players)
+    away_lineup = _lineup(db, away.id, sport_type, payload.featured_players)
+    lineup = home_lineup + away_lineup
+    # Bench players aren't drafted/displayed as the starting lineup, but the
+    # simulator can bring them on as substitutes — they need a resolvable
+    # sporty_player_id too, or subs show up as "Unknown player" mid-match.
+    bench = (
+        _bench(db, home.id, sport_type, {p.id for p in home_lineup})
+        + _bench(db, away.id, sport_type, {p.id for p in away_lineup})
     )
     team_name = {home.id: home.name, away.id: away.name}
     entries = [
@@ -138,7 +153,7 @@ async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(g
             "real_team": team_name.get(p.team_id, ""),
             "cost": 5.0,
         }
-        for p in lineup
+        for p in lineup + bench
     ]
     if payload.resolve_existing:
         resolved = await client.resolve_players({"sport": sport_slug, "players": entries})
@@ -148,14 +163,18 @@ async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(g
     player_uuids: list[str] = []
     home_uuids: list[str] = []
     away_uuids: list[str] = []
-    for p in lineup:
+    for p in lineup + bench:
         sporty_player_id = resolved["players"].get(f"feeder:player:{p.id}")
-        if sporty_player_id:
-            upsert_link(db, "player", p.id, sporty_player_id, commit=False)
-            player_uuids.append(sporty_player_id)
-            (home_uuids if p.team_id == home.id else away_uuids).append(sporty_player_id)
-            draftable.append({"name": p.name, "real_team": team_name.get(p.team_id, ""),
-                              "sporty_player_id": sporty_player_id})
+        if not sporty_player_id:
+            continue
+        upsert_link(db, "player", p.id, sporty_player_id, commit=False)
+        if p not in lineup:
+            continue  # bench: linked so subs resolve, but not part of the
+            # pushed starting lineup or the demo fantasy draft pool
+        player_uuids.append(sporty_player_id)
+        (home_uuids if p.team_id == home.id else away_uuids).append(sporty_player_id)
+        draftable.append({"name": p.name, "real_team": team_name.get(p.team_id, ""),
+                          "sporty_player_id": sporty_player_id})
     db.commit()
 
     # Push the per-team starting lineups so the match page can show who's playing.
