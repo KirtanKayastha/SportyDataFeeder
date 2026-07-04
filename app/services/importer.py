@@ -7,9 +7,30 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.database import Player, PlayerStat, Sport, Team
+from app.services.team_ratings import APP_TEAM_ALIASES
+from app.services.team_ratings import normalize_team_name as _elo_normalize_team_name
 
 BATCH_SIZE = 500
 PROGRESS_EVERY = 100
+
+
+def _canonicalize_team_name(team_cache: dict, name: str) -> str:
+    """Some seed CSVs use a short/alt form of a team name (e.g. "Liverpool"
+    instead of "Liverpool FC"), which previously created a duplicate Team
+    row per name variant. If `name` is the short alias (per APP_TEAM_ALIASES)
+    of a team already present in this sport's cache, resolve to that team's
+    actual stored name instead.
+
+    Deliberately data-driven rather than a static reverse-alias dict: two
+    long names can share one short alias (e.g. both "Wolverhampton" and
+    "Wolverhampton Wanderers" -> "Wolves"), so a static reverse map could
+    resolve to a name that doesn't match what's actually stored — recreating
+    the very duplicate-row problem this is meant to prevent.
+    """
+    for existing_name in team_cache:
+        if _elo_normalize_team_name(existing_name, APP_TEAM_ALIASES) == name:
+            return existing_name
+    return name
 
 GAMEWEEK_PATTERN = re.compile(r"(\d+)\s*(?:st|nd|rd|th)?\s*gameday", re.IGNORECASE)
 SEASON_PATTERN = re.compile(r"season\s*(\d{4}(?:-\d{2,4})?)", re.IGNORECASE)
@@ -129,6 +150,7 @@ def get_or_create_team(db, team_cache, sport_id: int, team_name: str):
     normalized_team_name = normalize_text(team_name, None)
     if not normalized_team_name:
         raise ValueError("Team name is empty")
+    normalized_team_name = _canonicalize_team_name(team_cache, normalized_team_name)
 
     cached_team = team_cache.get(normalized_team_name)
     if cached_team is not None:
