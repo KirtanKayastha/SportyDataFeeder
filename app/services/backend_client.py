@@ -1,6 +1,7 @@
 # /home/sam069/projects/SportyDataFeeder/app/services/backend_client.py
 #
-# Outbound push to the Sporty backend (PRD R-4.2). httpx async, X-Feeder-Secret
+# Outbound push to the Sporty backend (PRD R-4.2). httpx async over a
+# persistent, connection-pooled client (see get_backend_client), X-Feeder-Secret
 # header, 3 attempts with exponential backoff (1.5^n seconds). A failed push is
 # never fatal: it logs ERROR and returns False — events persist locally and can
 # be re-sent via POST /matches/{id}/replay-push.
@@ -44,7 +45,13 @@ class BackendClient:
         self.base_url = (base_url or settings.SPORTY_BACKEND_URL).rstrip("/")
         self.secret = secret if secret is not None else settings.FEEDER_SECRET
         self.backoff_base = backoff_base
-        self._transport = transport
+        # One client (and its connection pool) for the instance's whole life —
+        # a match simulation pushes dozens of events through the same
+        # BackendClient, and each call used to open+close a fresh connection.
+        self._client = httpx.AsyncClient(transport=transport, timeout=REQUEST_TIMEOUT)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     async def _post(self, path: str, payload: dict) -> bool:
         url = f"{self.base_url}{path}"
@@ -52,8 +59,7 @@ class BackendClient:
         last_error: str = ""
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                async with httpx.AsyncClient(transport=self._transport, timeout=REQUEST_TIMEOUT) as client:
-                    response = await client.post(url, json=payload, headers=headers)
+                response = await self._client.post(url, json=payload, headers=headers)
                 if response.status_code < 400:
                     logger.info("Pushed %s (attempt %s)", path, attempt)
                     return True
@@ -81,8 +87,7 @@ class BackendClient:
         delivered/failed flag). Raises on HTTP/transport error."""
         url = f"{self.base_url}{path}"
         headers = {"X-Feeder-Secret": self.secret}
-        async with httpx.AsyncClient(transport=self._transport, timeout=SETUP_TIMEOUT) as client:
-            response = await client.post(url, json=payload, headers=headers)
+        response = await self._client.post(url, json=payload, headers=headers, timeout=SETUP_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
@@ -91,8 +96,7 @@ class BackendClient:
         HTTP/transport error so the caller sees 404 (unknown) / 409 (live)."""
         url = f"{self.base_url}{path}"
         headers = {"X-Feeder-Secret": self.secret}
-        async with httpx.AsyncClient(transport=self._transport, timeout=SETUP_TIMEOUT) as client:
-            response = await client.delete(url, headers=headers)
+        response = await self._client.delete(url, headers=headers, timeout=SETUP_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
@@ -140,7 +144,16 @@ class BackendClient:
         return await self._post(MATCH_LINEUPS_PATH, payload)
 
 
+_client: BackendClient | None = None
+
+
 def get_backend_client() -> BackendClient:
-    """Factory used by the simulation and predict endpoints; tests monkeypatch
-    this to inject a client with a mock transport."""
-    return BackendClient()
+    """Process-wide singleton so every push (simulation loop, predict,
+    demo/matches orchestration) shares one connection-pooled httpx client
+    instead of opening a fresh connection per call. Tests monkeypatch this
+    name directly to inject a client with a mock transport, so they never
+    touch the cache below. Closed from app.main's lifespan on shutdown."""
+    global _client
+    if _client is None:
+        _client = BackendClient()
+    return _client

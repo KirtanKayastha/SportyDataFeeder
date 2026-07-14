@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import engine
 from app.routers import demo, events, imports, links, matches, players, predict, simulation, sports, teams
+from app.services.backend_client import get_backend_client
 from app.services.ml_models import load_all_models, load_outcome_v2, load_outcome_v2_basketball
 from app.services.simulation import running_count
 
@@ -34,6 +35,7 @@ def _load_models_into_state(app: FastAPI) -> None:
 async def lifespan(app: FastAPI):
     _load_models_into_state(app)
     yield
+    await get_backend_client().aclose()
 
 
 app = FastAPI(title="Sporty Data Feeder API", version="1.0.0", lifespan=lifespan)
