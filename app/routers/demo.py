@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from app.database import Match, Player, Sport, Team, get_db
-from app.services.backend_client import get_backend_client
+from app.services.backend_client import feeder_match_external_ref, get_backend_client
 from app.services.links import upsert_link
 from app.services.ml_models import predict_outcome_v2
 from app.services.simulation import BENCH_SIZE, LINEUP_SIZE, is_running, start_simulation
@@ -125,6 +125,7 @@ async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(g
         "home_team": home.name,
         "away_team": away.name,
         "match_date": match.match_date.isoformat() if match.match_date else None,
+        "external_ref": feeder_match_external_ref(match.id),
     })
     sporty_match_id = schedule["sporty_match_id"]
     upsert_link(db, "match", match.id, sporty_match_id, commit=False)

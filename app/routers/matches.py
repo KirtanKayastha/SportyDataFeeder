@@ -17,7 +17,7 @@ from app.database import (
     get_db,
 )
 from app.schemas import MatchCreate, MatchDetailRead, MatchRead
-from app.services.backend_client import get_backend_client
+from app.services.backend_client import feeder_match_external_ref, get_backend_client
 from app.services.links import delete_link, get_sporty_uuid, upsert_link
 from app.services.scoring_rules import score_events
 from app.services.simulation import LINEUP_SIZE, _select_lineup, is_running
@@ -149,6 +149,7 @@ async def schedule_on_sporty(match_id: int, db=Depends(get_db)):
             "home_team": home.name,
             "away_team": away.name,
             "match_date": match.match_date.isoformat() if match.match_date else None,
+            "external_ref": feeder_match_external_ref(match.id),
         }
     )
     sporty_match_id = schedule["sporty_match_id"]

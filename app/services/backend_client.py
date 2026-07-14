@@ -33,6 +33,19 @@ RESOLVE_PLAYERS_PATH = "/api/v1/feed/resolve-players"
 DEMO_SETUP_PATH = "/api/v1/feed/demo-setup"
 
 
+def feeder_match_external_ref(match_id: int) -> str:
+    """The external_ref every schedule_match caller must pass. Without one,
+    the backend derives an identity hash from home_team|away_team|match_date
+    (feed.py's ScheduleMatchPayload default) — fine for a single push, but it
+    means two DIFFERENT feeder matches sharing a team pairing and date (e.g. a
+    replayed demo fixture) alias onto the SAME Sporty match/Redis channel, so
+    a second simulation run overwrites/cross-talks with the first instead of
+    getting its own match. Keying on the feeder's own match id guarantees
+    every feeder match gets a distinct Sporty match, while still being
+    idempotent for repeat calls about the SAME feeder match id."""
+    return f"feeder:match:{match_id}"
+
+
 class BackendClient:
     def __init__(
         self,
