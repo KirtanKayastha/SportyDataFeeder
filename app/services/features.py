@@ -26,7 +26,10 @@ FOOTBALL_FALLBACK_RATES = {
     "goal": 0.003,
     "assist": 0.003,
     "yellow_card": 0.002,
-    "red_card": 0.0002,
+    # ~0.14 expected straight reds per 90-min match (22 players on pitch) —
+    # close to real-world frequency; second-yellow reds are derived
+    # separately in simulation.py::_apply_discipline and are additive.
+    "red_card": 0.00007,
 }
 BASKETBALL_FALLBACK_RATES = {
     "point_2": 0.04,
