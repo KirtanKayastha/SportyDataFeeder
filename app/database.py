@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    text,
 )
 from sqlalchemy.orm import declarative_base, relationship, scoped_session, sessionmaker
 
@@ -60,6 +61,9 @@ class Match(Base):
     match_date = Column(DateTime, default=utcnow)
     status = Column(String, default='scheduled')
     sport_id = Column(Integer, ForeignKey('sports.id'))
+    # Knockout fixtures can't end level: a tie after 90' goes to extra time
+    # and, if needed, a penalty shootout (simulation.py). League matches draw.
+    knockout = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
 
 class Event(Base):

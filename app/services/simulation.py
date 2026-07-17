@@ -44,12 +44,48 @@ FEATURED_RATE_FLOOR = {
     SportType.BASKETBALL: {"point_2": 0.06, "point_3": 0.03},
 }
 
+# ── Injuries, penalties, possession (football only) ──────────────────────────
+# Per-match incident counts are drawn ONCE at kickoff from capped distributions
+# — never independent per-minute rolls, which would make incidents routine just
+# because there are 90 minutes to roll against. Assumed real-world rates (tune
+# freely): forced-off injuries ~82% of matches none / 15% one / 3% two;
+# minor knocks (player plays on) ~70/25/5; penalties awarded ~72/26/2
+# (≈0.30/match ≈ one every 3.4 matches). Injury timing is biased late
+# (fatigue): triangular with mode at ~70% of the match.
+INJURY_FORCED_OFF_DIST = ((0, 0.82), (1, 0.15), (2, 0.03))
+INJURY_MINOR_DIST = ((0, 0.70), (1, 0.25), (2, 0.05))
+PENALTY_COUNT_DIST = ((0, 0.72), (1, 0.26), (2, 0.02))
+# Penalty resolution: ~78% scored, ~14% saved, remainder off target. A save
+# books BOTH penalty_saved (keeper) and penalty_missed (taker) — the FPL
+# convention where penalties_missed means "not scored".
+PENALTY_SCORED_PROB = 0.78
+PENALTY_SAVED_PROB = 0.14
+# Knockout ties: 30 minutes of extra time through the normal minute loop, then
+# a shootout — alternating kicks, 5 rounds each, sudden death after that.
+EXTRA_TIME_MINUTES = 30
+SHOOTOUT_CONVERSION = 0.76  # ~real elite conversion in shootouts
+MAX_SHOOTOUT_ROUNDS = 25  # ponytail: safety cap, coin-flip winner beyond it
+
+# Possession: a single mean-reverting share of the ball for the home side,
+# stepped once per minute (AR(1)) and nudged by events (conceding side pushes
+# up; a red card shifts the anchor for the rest of the match). Goal probability
+# is scaled by share/anchor, so expected goals still match the calibrated
+# league averages while "who has the ball" modulates minute-to-minute chances.
+POSSESSION_PULL = 0.15
+POSSESSION_NOISE = 0.06
+POSSESSION_GOAL_NUDGE = 0.04
+POSSESSION_RED_CARD_SHIFT = 0.08
+
 # Real league HOME/AWAY scoring averages used to calibrate simulated scoring.
 # Calibrating home and away separately bakes in home advantage, so simulated
 # home-win rates approach reality (EPL ~45% home; NBA ~58% home).
 # Sources: 13 EPL seasons, 18 NBA seasons (see reports/).
-FOOTBALL_HOME_GOALS = 1.55
-FOOTBALL_AWAY_GOALS = 1.25
+# The penalty mechanism adds its goals ON TOP of open-play sampling, so the
+# open-play targets are the league averages minus the expected penalty goals
+# (split evenly between home and away) — total scoring stays at league level.
+_EXPECTED_PENALTY_GOALS = sum(k * p for k, p in PENALTY_COUNT_DIST) * PENALTY_SCORED_PROB
+FOOTBALL_HOME_GOALS = 1.55 - _EXPECTED_PENALTY_GOALS / 2
+FOOTBALL_AWAY_GOALS = 1.25 - _EXPECTED_PENALTY_GOALS / 2
 BASKETBALL_HOME_POINTS = 104.9
 BASKETBALL_AWAY_POINTS = 102.2
 
@@ -108,6 +144,14 @@ class SimulationState:
     events_inserted: int = 0
     push_failures: int = 0
     stop_requested: bool = False
+    # Football extras: running possession split, and the shootout tally for
+    # knockout matches still level after extra time (regulation score is
+    # home_score/away_score; the shootout is tracked separately).
+    possession_home_pct: float | None = None
+    possession_away_pct: float | None = None
+    shootout_home: int | None = None
+    shootout_away: int | None = None
+    shootout_winner_team_id: int | None = None
     error: str | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -287,6 +331,18 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
             match_id, cold_starts, len(lineups),
         )
 
+    # Possession anchor from PRE-calibration goal rates (calibration forces
+    # both sides to league targets, which would erase the quality difference):
+    # the stronger squad tends to hold more of the ball. Small home tilt on
+    # top, clamped so neither side starts camped in the other's half.
+    possession_anchor = 0.5
+    if sport_type is SportType.FOOTBALL:
+        home_exp = sum(rates_by_player[p.id].get("goal", 0.0) for p in home_lineup)
+        away_exp = sum(rates_by_player[p.id].get("goal", 0.0) for p in away_lineup)
+        if home_exp + away_exp > 0:
+            possession_anchor = home_exp / (home_exp + away_exp)
+        possession_anchor = min(max(possession_anchor + 0.02, 0.35), 0.65)
+
     home_factor = away_factor = 1.0
     if get_settings().SIMULATION_CALIBRATE:
         rates_by_player, (home_factor, away_factor) = calibrate_scoring_rates(
@@ -350,6 +406,7 @@ def _prepare(db, match_id: int, event_rates: dict | None, featured: list[str] | 
         "featured_ids": featured_ids,
         "player_team_map": {player.id: player.team_id for player in pool},
         "rates_by_player": rates_by_player,
+        "possession_anchor": possession_anchor,
         "mappings": mappings,
     }
 
@@ -393,6 +450,12 @@ def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
     rates_by_player = setup["rates_by_player"]
     assistable = ASSISTABLE_EVENTS.get(sport_type, set())
     assist_prob = ASSIST_PROBABILITY.get(sport_type, 0.0)
+    # This minute's possession share (set by the loop; None for basketball):
+    # the side with the ball gets proportionally more goal chances. Dividing by
+    # the anchor keeps the expected value at the calibrated league level.
+    share = setup.get("minute_share")
+    home_team_id = setup["match"].home_team_id if share is not None else None
+    anchor = setup.get("possession_anchor", 0.5)
 
     teammates_by_team: dict = {}
     for player in setup["lineups"]:
@@ -408,6 +471,9 @@ def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
             if event_type == "assist":
                 continue
             p = min(max(float(probability), 0.0), 1.0)
+            if share is not None and event_type == "goal":
+                mult = (share / anchor) if player.team_id == home_team_id else ((1.0 - share) / (1.0 - anchor))
+                p = min(p * mult, 1.0)
             if p <= 0.0 or not numpy.random.binomial(1, p):
                 continue
             extra = None
@@ -421,6 +487,30 @@ def _sample_minute_events(setup: dict, minute: int) -> list[dict]:
                 if assister is not None:
                     fired.append(make_event("assist", assister))
     return fired
+
+
+def _is_keeper(player) -> bool:
+    return (player.position or "").strip().upper().startswith("G")
+
+
+def _draw_count(dist) -> int:
+    values, probs = zip(*dist)
+    return int(numpy.random.choice(values, p=probs))
+
+
+def _draw_injuries(total_minutes: int) -> list[tuple[int, str]]:
+    """Pre-drawn (minute, severity) injury schedule for the whole match, from
+    the capped per-match count distributions; timing biased late (fatigue)."""
+    injuries = [
+        (int(numpy.random.triangular(5, 0.7 * total_minutes, total_minutes)), severity)
+        for severity, dist in (("forced_off", INJURY_FORCED_OFF_DIST), ("minor", INJURY_MINOR_DIST))
+        for _ in range(_draw_count(dist))
+    ]
+    return sorted(injuries)
+
+
+def _draw_penalty_minutes(total_minutes: int) -> list[int]:
+    return sorted(int(numpy.random.randint(1, total_minutes + 1)) for _ in range(_draw_count(PENALTY_COUNT_DIST)))
 
 
 def _draw_sub_minutes(n: int, total_minutes: int) -> list[int]:
@@ -451,11 +541,20 @@ def _setup_dynamics(setup: dict) -> dict:
         if sport_type is SportType.FOOTBALL:
             planned = min(FOOTBALL_MAX_SUBS, len(bench))
             entry["sub_minutes"] = _draw_sub_minutes(planned, TOTAL_MINUTES[sport_type]) if planned else []
+            # Shared budget between planned (tactical) and injury-forced subs.
+            entry["subs_left"] = FOOTBALL_MAX_SUBS
         else:
             entry["stint"] = {}
             entry["rest"] = {}
         teams[team_id] = entry
-    return {"teams": teams, "yellows": set(), "sent_off": set(), "minutes": {}}
+    dynamics = {"teams": teams, "yellows": set(), "sent_off": set(), "minutes": {}}
+    if sport_type is SportType.FOOTBALL:
+        total = TOTAL_MINUTES[sport_type]
+        dynamics["injuries"] = _draw_injuries(total)
+        dynamics["penalties"] = _draw_penalty_minutes(total)
+        anchor = setup.get("possession_anchor", 0.5)
+        dynamics["possession"] = {"anchor": anchor, "share": anchor, "sum_home": 0.0, "minutes": 0}
+    return dynamics
 
 
 def _swap_players(setup: dict, player_off, player_on) -> None:
@@ -472,18 +571,20 @@ def _football_substitutions(setup: dict, dynamics: dict, minute: int) -> list[di
     for team_id, team in dynamics["teams"].items():
         while team["sub_minutes"] and team["sub_minutes"][0] <= minute:
             team["sub_minutes"].pop(0)
-            if not team["bench"]:
+            # subs_left is shared with injury-forced subs, so a team that
+            # burned windows on injuries skips its remaining planned ones.
+            if not team["bench"] or team["subs_left"] <= 0:
                 break
             active = [p for p in setup["lineups"] if p.team_id == team_id]
             eligible = [
                 p for p in active
-                if p.id not in setup["featured_ids"]
-                and not (p.position or "").strip().upper().startswith("G")
+                if p.id not in setup["featured_ids"] and not _is_keeper(p)
             ] or [p for p in active if p.id not in setup["featured_ids"]] or active
             if not eligible:
                 continue
             player_off = eligible[int(numpy.random.randint(len(eligible)))]
             player_on = team["bench"].pop(int(numpy.random.randint(len(team["bench"]))))
+            team["subs_left"] -= 1
             _swap_players(setup, player_off, player_on)
             events.append(_make_event(
                 "substitution", player_on, minute,
@@ -521,6 +622,141 @@ def _basketball_rotation(setup: dict, dynamics: dict, minute: int) -> list[dict]
                 extra={"player_out": player_off.id, "player_out_name": player_off.name},
                 related_player_id=player_off.id,
             ))
+    return events
+
+
+def _injury_events(setup: dict, dynamics: dict, minute: int) -> list[dict]:
+    """Fire this minute's pre-drawn injuries. A minor knock is just an event
+    (player plays on). A forced-off injury consumes a substitution if the team
+    still has bench and sub windows (keeper injuries prefer a bench keeper);
+    with no sub available the player goes off and the team plays short."""
+    events: list[dict] = []
+    while dynamics["injuries"] and dynamics["injuries"][0][0] <= minute:
+        _, severity = dynamics["injuries"].pop(0)
+        candidates = [p for p in setup["lineups"] if p.id not in setup["featured_ids"]]
+        if not candidates:
+            continue
+        player = candidates[int(numpy.random.randint(len(candidates)))]
+        events.append(_make_event("injury", player, minute, extra={"severity": severity}))
+        if severity != "forced_off":
+            continue
+        team = dynamics["teams"][player.team_id]
+        if team["bench"] and team["subs_left"] > 0:
+            bench = team["bench"]
+            keepers = [p for p in bench if _is_keeper(p)] if _is_keeper(player) else []
+            player_on = keepers[0] if keepers else bench[int(numpy.random.randint(len(bench)))]
+            bench.remove(player_on)
+            team["subs_left"] -= 1
+            _swap_players(setup, player, player_on)
+            events.append(_make_event(
+                "substitution", player_on, minute,
+                extra={"player_out": player.id, "player_out_name": player.name, "reason": "injury"},
+                related_player_id=player.id,
+            ))
+        else:
+            setup["lineups"].remove(player)
+    return events
+
+
+def _penalty_events(setup: dict, dynamics: dict, minute: int) -> list[dict]:
+    """Resolve this minute's pre-drawn penalty kicks. The attacking side is
+    drawn from the current possession share (the team with the ball wins the
+    penalty); the taker is the on-pitch player with the best goal rate. A
+    scored penalty is a normal goal event (extra.penalty=true) so match score
+    and fantasy points need no special casing; a save credits the opposing
+    keeper penalty_saved AND books penalty_missed for the taker."""
+    events: list[dict] = []
+    match = setup["match"]
+    while dynamics["penalties"] and dynamics["penalties"][0] <= minute:
+        dynamics["penalties"].pop(0)
+        share = dynamics["possession"]["share"]
+        attacking = match.home_team_id if numpy.random.random() < share else match.away_team_id
+        attackers = [p for p in setup["lineups"] if p.team_id == attacking and not _is_keeper(p)]
+        if not attackers:
+            continue
+        rates = setup["rates_by_player"]
+        taker = max(attackers, key=lambda p: (rates.get(p.id, {}).get("goal", 0.0), -p.id))
+        roll = numpy.random.random()
+        if roll < PENALTY_SCORED_PROB:
+            events.append(_make_event("goal", taker, minute, extra={"penalty": True}))
+        else:
+            events.append(_make_event("penalty_missed", taker, minute))
+            if roll < PENALTY_SCORED_PROB + PENALTY_SAVED_PROB:
+                keepers = [p for p in setup["lineups"] if p.team_id != attacking and _is_keeper(p)]
+                if keepers:
+                    events.append(_make_event("penalty_saved", keepers[0], minute))
+    return events
+
+
+def _update_possession(dynamics: dict) -> float:
+    """One AR(1) step of the home side's ball share; accumulates the running
+    average that becomes the full-time possession_pct."""
+    pos = dynamics["possession"]
+    share = pos["share"] + POSSESSION_PULL * (pos["anchor"] - pos["share"]) \
+        + float(numpy.random.normal(0.0, POSSESSION_NOISE))
+    pos["share"] = min(max(share, 0.25), 0.75)
+    pos["sum_home"] += pos["share"]
+    pos["minutes"] += 1
+    return pos["share"]
+
+
+def _nudge_possession(dynamics: dict, minute_events: list[dict], home_team_id: int) -> None:
+    """Event-driven possession shifts: the side that concedes pushes for a
+    response (temporary share nudge); a red card shifts the anchor for the
+    rest of the match (ten men sit deep)."""
+    pos = dynamics["possession"]
+    for event in minute_events:
+        home_side = event["team_id"] == home_team_id
+        if event["event_type"] == "goal":
+            pos["share"] += -POSSESSION_GOAL_NUDGE if home_side else POSSESSION_GOAL_NUDGE
+        elif event["event_type"] == "red_card":
+            pos["anchor"] += -POSSESSION_RED_CARD_SHIFT if home_side else POSSESSION_RED_CARD_SHIFT
+    pos["share"] = min(max(pos["share"], 0.25), 0.75)
+    pos["anchor"] = min(max(pos["anchor"], 0.30), 0.70)
+
+
+def _run_shootout(setup: dict, state: SimulationState, minute: int) -> list[dict]:
+    """Penalty shootout: alternating kicks, 5 rounds each, sudden death until
+    decided. Kicks are shootout_goal / shootout_miss events — scoring_rules
+    ignores those types, so the regulation/ET score is untouched. Takers cycle
+    best-goal-rate-first. ponytail: rounds always complete (no early stop when
+    mathematically decided)."""
+    match = setup["match"]
+    rates = setup["rates_by_player"]
+    takers = {
+        team_id: sorted(
+            [p for p in setup["lineups"] if p.team_id == team_id],
+            key=lambda p: (-rates.get(p.id, {}).get("goal", 0.0), p.id),
+        )
+        for team_id in (match.home_team_id, match.away_team_id)
+    }
+    events: list[dict] = []
+    scores = {match.home_team_id: 0, match.away_team_id: 0}
+    for round_no in range(1, MAX_SHOOTOUT_ROUNDS + 1):
+        for team_id in (match.home_team_id, match.away_team_id):
+            pool = takers[team_id]
+            if not pool:  # entire side sent off/injured out — automatic miss
+                continue
+            kicker = pool[(round_no - 1) % len(pool)]
+            if numpy.random.random() < SHOOTOUT_CONVERSION:
+                scores[team_id] += 1
+                events.append(_make_event("shootout_goal", kicker, minute))
+            else:
+                events.append(_make_event("shootout_miss", kicker, minute))
+        if round_no >= 5 and scores[match.home_team_id] != scores[match.away_team_id]:
+            break
+    state.shootout_home = scores[match.home_team_id]
+    state.shootout_away = scores[match.away_team_id]
+    if scores[match.home_team_id] != scores[match.away_team_id]:
+        state.shootout_winner_team_id = max(scores, key=lambda t: scores[t])
+    else:
+        state.shootout_winner_team_id = (
+            match.home_team_id if numpy.random.random() < 0.5 else match.away_team_id
+        )
+        logger.warning(
+            "Match %s: shootout undecided after %s rounds; coin-flip winner",
+            state.match_id, MAX_SHOOTOUT_ROUNDS,
+        )
     return events
 
 
@@ -567,7 +803,7 @@ def _advance_clocks(setup: dict, dynamics: dict) -> None:
 
 
 def build_match_result_payload(state: SimulationState, mappings: dict, status: str, events: list[dict]) -> dict:
-    return {
+    payload = {
         "sporty_match_id": mappings["match"],
         "sport": state.sport_type.value,
         "status": status,
@@ -584,10 +820,25 @@ def build_match_result_payload(state: SimulationState, mappings: dict, status: s
                 # Substitutions carry the player coming OFF so the backend can
                 # publish a LINEUP_CHANGE; None (and ignored) for other events.
                 "related_sporty_player_id": mappings["players"].get(event.get("related_player_id")),
+                # Event detail passthrough (penalty flag, injury severity,
+                # substitution reason) so the frontend can render it.
+                "extra": event.get("extra"),
             }
             for event in events
         ],
     }
+    # Football extras (absent for basketball / pre-feature replays): running
+    # possession split and, for knockout ties, the shootout tally + winner.
+    if state.possession_home_pct is not None:
+        payload["possession_home_pct"] = state.possession_home_pct
+        payload["possession_away_pct"] = state.possession_away_pct
+    if state.shootout_home is not None:
+        payload["shootout"] = {
+            "home": state.shootout_home,
+            "away": state.shootout_away,
+            "winner_sporty_team_id": mappings["teams"].get(state.shootout_winner_team_id),
+        }
+    return payload
 
 
 def build_player_ratings_payload(
@@ -664,19 +915,9 @@ async def run_simulation(
             if not await client.push_match_result(kickoff_payload):
                 state.push_failures += 1
 
-        async def play_minute(minute: int) -> None:
-            state.current_minute = minute
-            # Substitutions happen first so players entering at minute m play
-            # minute m; then events are sampled from the post-sub lineup, and
-            # football discipline (2nd yellow -> red -> off) is applied last.
-            if state.sport_type is SportType.FOOTBALL:
-                sub_events = _football_substitutions(setup, dynamics, minute)
-            else:
-                sub_events = _basketball_rotation(setup, dynamics, minute)
-            minute_events = sub_events + _sample_minute_events(setup, minute)
-            _apply_discipline(setup, dynamics, minute_events, minute)
-            _advance_clocks(setup, dynamics)
-
+        async def record_and_push(minute_events: list[dict]) -> None:
+            """Persist a batch of events, apply score deltas, push ONE HTTP
+            call (R-4.1 step 5). Shared by the minute loop and the shootout."""
             for event in minute_events:
                 db.add(
                     Event(
@@ -697,17 +938,39 @@ async def run_simulation(
                         state.away_score += delta
             db.commit()
             state.events_inserted += len(minute_events)
-            logger.debug(
-                "Match %s minute %s: %s events, score %s-%s",
-                state.match_id, minute, len(minute_events), state.home_score, state.away_score,
-            )
 
-            # One HTTP call per minute tick — never per-event (R-4.1 step 5).
             if push_enabled and minute_events:
                 payload = build_match_result_payload(state, mappings, "live", minute_events)
                 if not await client.push_match_result(payload):
                     state.push_failures += 1
 
+        async def play_minute(minute: int) -> None:
+            state.current_minute = minute
+            # Substitutions happen first so players entering at minute m play
+            # minute m; then possession steps, pre-drawn injuries/penalties
+            # resolve, events are sampled from the post-sub lineup, and
+            # football discipline (2nd yellow -> red -> off) is applied last.
+            if state.sport_type is SportType.FOOTBALL:
+                sub_events = _football_substitutions(setup, dynamics, minute)
+                setup["minute_share"] = _update_possession(dynamics)
+                sub_events += _injury_events(setup, dynamics, minute)
+                sub_events += _penalty_events(setup, dynamics, minute)
+            else:
+                sub_events = _basketball_rotation(setup, dynamics, minute)
+            minute_events = sub_events + _sample_minute_events(setup, minute)
+            _apply_discipline(setup, dynamics, minute_events, minute)
+            if state.sport_type is SportType.FOOTBALL:
+                _nudge_possession(dynamics, minute_events, match.home_team_id)
+                pos = dynamics["possession"]
+                state.possession_home_pct = round(100.0 * pos["sum_home"] / pos["minutes"], 1)
+                state.possession_away_pct = round(100.0 - state.possession_home_pct, 1)
+            _advance_clocks(setup, dynamics)
+
+            await record_and_push(minute_events)
+            logger.debug(
+                "Match %s minute %s: %s events, score %s-%s",
+                state.match_id, minute, len(minute_events), state.home_score, state.away_score,
+            )
             await asyncio.sleep(speed)
 
         for minute in range(1, state.total_minutes + 1):
@@ -715,6 +978,31 @@ async def run_simulation(
                 logger.info("Match %s: stop requested at minute %s", state.match_id, state.current_minute)
                 break
             await play_minute(minute)
+
+        # Knockout football tied after 90: 30 minutes of extra time through
+        # the same minute loop, then a shootout if still level. The shootout
+        # tally never touches home_score/away_score.
+        if (
+            state.sport_type is SportType.FOOTBALL
+            and bool(getattr(match, "knockout", False))
+            and not state.stop_requested
+            and state.home_score == state.away_score
+        ):
+            minute = state.total_minutes
+            logger.info("Match %s: knockout tie after %s min; extra time", state.match_id, minute)
+            for _ in range(EXTRA_TIME_MINUTES):
+                if state.stop_requested:
+                    break
+                minute += 1
+                await play_minute(minute)
+            if not state.stop_requested and state.home_score == state.away_score:
+                shootout_events = _run_shootout(setup, state, minute + 1)
+                await record_and_push(shootout_events)
+                logger.info(
+                    "Match %s: shootout %s-%s, winner team %s",
+                    state.match_id, state.shootout_home, state.shootout_away,
+                    state.shootout_winner_team_id,
+                )
 
         # Basketball has no draws: a regulation tie goes to 10-minute overtime
         # periods until it is broken (capped for safety).
@@ -734,6 +1022,24 @@ async def run_simulation(
                     await play_minute(minute)
                 if state.stop_requested:
                     break
+
+        # Persist the full-time possession split locally (team-level stat, no
+        # player) so it survives the in-memory simulation registry.
+        if state.sport_type is SportType.FOOTBALL and dynamics["possession"]["minutes"]:
+            db.add(
+                Event(
+                    event_id=str(uuid.uuid4()),
+                    match_id=state.match_id,
+                    event_type="possession",
+                    player_id=None,
+                    minute=state.current_minute,
+                    extra=json.dumps({
+                        "home_pct": state.possession_home_pct,
+                        "away_pct": state.possession_away_pct,
+                    }),
+                )
+            )
+            state.events_inserted += 1
 
         state.status = "stopped" if state.stop_requested else "finished"
         match.status = "finished"

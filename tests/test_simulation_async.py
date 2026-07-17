@@ -270,7 +270,10 @@ class TestPushContract:
         match_pushes = mock_backend.captured["match_result"]
         assert match_pushes, "expected at least one minute-batch push"
         batched_events = [event for push in match_pushes for event in push["events"]]
-        assert len(batched_events) == final["events_inserted"]
+        # events_inserted includes the local-only full-time "possession" row;
+        # possession is pushed as payload fields, never as an event.
+        assert len(batched_events) == final["events_inserted"] - 1
+        assert match_pushes[-1]["possession_home_pct"] + match_pushes[-1]["possession_away_pct"] == 100.0
         for push in match_pushes:
             assert push["sporty_match_id"] == MATCH_UUID
             assert push["sport"] == "football"

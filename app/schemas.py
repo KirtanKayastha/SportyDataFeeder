@@ -54,6 +54,7 @@ class MatchCreate(BaseModel):
     away_team_id: int
     match_date: datetime
     sport_id: int
+    knockout: bool = False
 
 
 class MatchRead(BaseModel):
@@ -65,6 +66,7 @@ class MatchRead(BaseModel):
     match_date: datetime
     status: str
     sport_id: int
+    knockout: bool = False
 
 
 class MatchDetailRead(MatchRead):
@@ -117,6 +119,9 @@ class SimulateStartRequest(BaseModel):
     home_team_id: int | None = None
     away_team_id: int | None = None
     sport_id: int | None = None
+    # Only used when creating the match here; an existing match_id keeps its
+    # stored knockout flag.
+    knockout: bool = False
     sporty_match_id: str | None = None
     sporty_home_team_id: str | None = None
     sporty_away_team_id: str | None = None
@@ -137,6 +142,13 @@ class SimulationStatusRead(BaseModel):
     away_score: int
     events_inserted: int
     push_failures: int
+    # Football only (None for basketball): running possession split and, for
+    # knockout ties, the shootout tally + winner.
+    possession_home_pct: float | None = None
+    possession_away_pct: float | None = None
+    shootout_home: int | None = None
+    shootout_away: int | None = None
+    shootout_winner_team_id: int | None = None
     error: str | None = None
 
 

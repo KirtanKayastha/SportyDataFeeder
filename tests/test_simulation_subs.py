@@ -91,6 +91,10 @@ def test_football_substitutions_swap_active_players(client, football_world, wait
     monkeypatch.setattr(simulation_service, "_draw_sub_minutes", lambda n, total: [46, 60, 75][:n])
     monkeypatch.setattr(simulation_service, "TOTAL_MINUTES",
                         {**simulation_service.TOTAL_MINUTES, simulation_service.SportType.FOOTBALL: 80})
+    # Random injuries/penalties would add substitutions and events at other
+    # minutes; disable them so the planned-window assertions stay exact.
+    monkeypatch.setattr(simulation_service, "_draw_injuries", lambda total: [])
+    monkeypatch.setattr(simulation_service, "_draw_penalty_minutes", lambda total: [])
 
     client.post("/simulate", json={"match_id": match_id})
     final = wait_for_simulation(client, match_id)

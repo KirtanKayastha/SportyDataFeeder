@@ -69,6 +69,7 @@ def _get_or_create_match(db, payload: SimulateStartRequest) -> Match:
         away_team_id=payload.away_team_id,
         sport_id=payload.sport_id,
         status="scheduled",
+        knockout=payload.knockout,
     )
     db.add(match)
     db.commit()
@@ -105,24 +106,30 @@ async def start_match_simulation(payload: SimulateStartRequest, request: Request
     )
 
 
+def _status_read(state: SimulationState) -> SimulationStatusRead:
+    return SimulationStatusRead(
+        match_id=state.match_id,
+        status=state.status,
+        current_minute=state.current_minute,
+        total_minutes=state.total_minutes,
+        home_score=state.home_score,
+        away_score=state.away_score,
+        events_inserted=state.events_inserted,
+        push_failures=state.push_failures,
+        possession_home_pct=state.possession_home_pct,
+        possession_away_pct=state.possession_away_pct,
+        shootout_home=state.shootout_home,
+        shootout_away=state.shootout_away,
+        shootout_winner_team_id=state.shootout_winner_team_id,
+        error=state.error,
+    )
+
+
 @router.get("/simulate", response_model=list[SimulationStatusRead])
 def list_match_simulations():
     """All simulations this process knows about (running + recently ended).
     Drives the admin panel's live monitor without polling each match."""
-    return [
-        SimulationStatusRead(
-            match_id=state.match_id,
-            status=state.status,
-            current_minute=state.current_minute,
-            total_minutes=state.total_minutes,
-            home_score=state.home_score,
-            away_score=state.away_score,
-            events_inserted=state.events_inserted,
-            push_failures=state.push_failures,
-            error=state.error,
-        )
-        for state in list_simulations()
-    ]
+    return [_status_read(state) for state in list_simulations()]
 
 
 @router.get("/simulate/{match_id}/status", response_model=SimulationStatusRead)
@@ -133,17 +140,7 @@ def simulation_status(match_id: int):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No simulation found for match {match_id}",
         )
-    return SimulationStatusRead(
-        match_id=state.match_id,
-        status=state.status,
-        current_minute=state.current_minute,
-        total_minutes=state.total_minutes,
-        home_score=state.home_score,
-        away_score=state.away_score,
-        events_inserted=state.events_inserted,
-        push_failures=state.push_failures,
-        error=state.error,
-    )
+    return _status_read(state)
 
 
 @router.post("/simulate/{match_id}/stop")

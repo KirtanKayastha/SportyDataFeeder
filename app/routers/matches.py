@@ -108,6 +108,7 @@ def create_match(payload: MatchCreate, db=Depends(get_db)):
         match_date=payload.match_date,
         sport_id=payload.sport_id,
         status="scheduled",
+        knockout=payload.knockout,
     )
     db.add(match)
     try:
