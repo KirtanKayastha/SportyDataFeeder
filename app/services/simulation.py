@@ -552,6 +552,9 @@ def _setup_dynamics(setup: dict) -> dict:
         total = TOTAL_MINUTES[sport_type]
         dynamics["injuries"] = _draw_injuries(total)
         dynamics["penalties"] = _draw_penalty_minutes(total)
+        # Players carrying a minor knock: preferred to come off at the next
+        # tactical sub window (the manager protects the limping player).
+        dynamics["knocked"] = set()
         anchor = setup.get("possession_anchor", 0.5)
         dynamics["possession"] = {"anchor": anchor, "share": anchor, "sum_home": 0.0, "minutes": 0}
     return dynamics
@@ -582,7 +585,11 @@ def _football_substitutions(setup: dict, dynamics: dict, minute: int) -> list[di
             ] or [p for p in active if p.id not in setup["featured_ids"]] or active
             if not eligible:
                 continue
-            player_off = eligible[int(numpy.random.randint(len(eligible)))]
+            # A player carrying a knock comes off first — the manager uses the
+            # next window to protect them rather than risk a full injury.
+            knocked = [p for p in eligible if p.id in dynamics["knocked"]]
+            pool = knocked or eligible
+            player_off = pool[int(numpy.random.randint(len(pool)))]
             player_on = team["bench"].pop(int(numpy.random.randint(len(team["bench"]))))
             team["subs_left"] -= 1
             _swap_players(setup, player_off, player_on)
@@ -639,6 +646,7 @@ def _injury_events(setup: dict, dynamics: dict, minute: int) -> list[dict]:
         player = candidates[int(numpy.random.randint(len(candidates)))]
         events.append(_make_event("injury", player, minute, extra={"severity": severity}))
         if severity != "forced_off":
+            dynamics["knocked"].add(player.id)
             continue
         team = dynamics["teams"][player.team_id]
         if team["bench"] and team["subs_left"] > 0:

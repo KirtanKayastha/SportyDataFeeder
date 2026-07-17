@@ -126,6 +126,53 @@ def test_forced_off_without_subs_means_man_down(client, football_world, wait_for
     assert not [e for e in events if e.minute > 5 and e.player_id == injured.player_id]
 
 
+def test_knocked_player_comes_off_at_next_sub_window(client, wait_for_simulation, monkeypatch):
+    """A minor knock doesn't sub the player immediately, but the next tactical
+    window takes THEM off rather than a random teammate. All-outfielder roster
+    so the knock can't land on a keeper (keepers are never tactically subbed)."""
+    sport_id = client.post("/sports", json={"name": "football"}).json()["id"]
+    home = client.post("/teams", json={"name": "Knock FC", "sport_id": sport_id}).json()["id"]
+    away = client.post("/teams", json={"name": "Fresh FC", "sport_id": sport_id}).json()["id"]
+    players = {home: [], away: []}
+    for team_id, prefix in ((home, "H"), (away, "A")):
+        for index in range(14):
+            player = client.post(
+                "/players",
+                json={"name": f"{prefix} P{index}", "team_id": team_id,
+                      "position": "M", "sport_id": sport_id},
+            ).json()
+            players[team_id].append(player["id"])
+    match_id = client.post(
+        "/matches",
+        json={"home_team_id": home, "away_team_id": away,
+              "match_date": "2026-06-10T18:00:00", "sport_id": sport_id},
+    ).json()["id"]
+    client.app.state.event_rates = {
+        pid: {"goal": 0.0} for pids in players.values() for pid in pids
+    }
+    monkeypatch.setattr(simulation_service, "_draw_injuries", lambda total: [(10, "minor")])
+    monkeypatch.setattr(simulation_service, "_draw_penalty_minutes", lambda total: [])
+    monkeypatch.setattr(simulation_service, "_draw_sub_minutes", lambda n, total: [20][:n])
+    monkeypatch.setattr(simulation_service, "TOTAL_MINUTES",
+                        {**simulation_service.TOTAL_MINUTES, simulation_service.SportType.FOOTBALL: 30})
+
+    client.post("/simulate", json={"match_id": match_id})
+    final = wait_for_simulation(client, match_id)
+    assert final["status"] == "finished"
+
+    events = all_events(match_id)
+    knock = [e for e in events if e.event_type == "injury"][0]
+    assert json.loads(knock.extra)["severity"] == "minor"
+    # No sub at the knock itself; at the 20' window, the knocked player's team
+    # takes exactly the knocked player off.
+    subs = [e for e in events if e.event_type == "substitution"]
+    assert all(e.minute == 20 for e in subs)
+    knocked_team_subs = [
+        e for e in subs if json.loads(e.extra)["player_out"] == knock.player_id
+    ]
+    assert len(knocked_team_subs) == 1
+
+
 def test_penalty_resolves_to_goal_or_miss(client, football_world, wait_for_simulation, monkeypatch):
     """One scheduled penalty yields exactly one attempt: a goal flagged
     extra.penalty, or a penalty_missed (a save adds penalty_saved for the

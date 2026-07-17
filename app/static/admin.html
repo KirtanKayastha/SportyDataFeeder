@@ -131,6 +131,7 @@
           <button class="primary" onclick="scheduleMatch()">Schedule</button>
         </div>
         <label class="toggle" style="margin-top:12px"><input type="checkbox" id="schedPush" checked /> Show on Sporty matches page (push as upcoming)</label>
+        <label class="toggle" style="margin-top:8px"><input type="checkbox" id="schedKnockout" /> Knockout tie (no draws — a level match plays extra time, then a penalty shootout)</label>
         <p class="dim" style="margin-top:8px; font-size:12px">Pick the exact date and time of kick-off — uses your local timezone.</p>
       </div>
     </section>
@@ -395,7 +396,7 @@ async function scheduleMatch() {
   if (!dateVal || !timeVal) { toast('Pick a kick-off date and time', 'err'); return; }
   const match_date = new Date(`${dateVal}T${timeVal}`).toISOString();
   try {
-    const m = await api('/matches', { method: 'POST', body: JSON.stringify({ home_team_id, away_team_id, sport_id, match_date }) });
+    const m = await api('/matches', { method: 'POST', body: JSON.stringify({ home_team_id, away_team_id, sport_id, match_date, knockout: $('schedKnockout').checked }) });
     let msg = `Scheduled match #${m.id}`;
     if ($('schedPush').checked) {
       try {
@@ -406,6 +407,7 @@ async function scheduleMatch() {
       }
     }
     toast(msg, 'ok');
+    $('schedKnockout').checked = false;  // knockout never carries over to the next fixture
     $('statusFilter').value = 'scheduled';
     $('sportFilter').value = String(sport_id);
     await loadMatches();
@@ -426,7 +428,7 @@ async function loadMatches() {
       const st = (m.status || '').toLowerCase();
       return `<tr class="clickable${sel}" onclick="selectMatch(${m.id}, '${(teamMap[m.home_team_id]||'?').replace(/'/g,'')}', '${(teamMap[m.away_team_id]||'?').replace(/'/g,'')}')">
         <td class="dim">${m.id}</td>
-        <td>${teamMap[m.home_team_id] || m.home_team_id} <span class="dim">vs</span> ${teamMap[m.away_team_id] || m.away_team_id}</td>
+        <td>${teamMap[m.home_team_id] || m.home_team_id} <span class="dim">vs</span> ${teamMap[m.away_team_id] || m.away_team_id}${m.knockout ? ' <span class="pill scheduled" title="Knockout tie: a draw goes to extra time, then a shootout">KO</span>' : ''}</td>
         <td class="muted">${sportMap[m.sport_id] || m.sport_id}</td>
         <td><span class="pill ${st}">${st || 'scheduled'}</span></td>
         <td style="text-align:right; white-space:nowrap">
