@@ -164,26 +164,33 @@ async def demo_launch(payload: DemoLaunchRequest, request: Request, db=Depends(g
     player_uuids: list[str] = []
     home_uuids: list[str] = []
     away_uuids: list[str] = []
+    home_bench_uuids: list[str] = []
+    away_bench_uuids: list[str] = []
     for p in lineup + bench:
         sporty_player_id = resolved["players"].get(f"feeder:player:{p.id}")
         if not sporty_player_id:
             continue
         upsert_link(db, "player", p.id, sporty_player_id, commit=False)
         if p not in lineup:
-            continue  # bench: linked so subs resolve, but not part of the
-            # pushed starting lineup or the demo fantasy draft pool
+            # Bench: linked so subs resolve and pushed as the bench group for
+            # the match page, but not part of the demo fantasy draft pool.
+            (home_bench_uuids if p.team_id == home.id else away_bench_uuids).append(sporty_player_id)
+            continue
         player_uuids.append(sporty_player_id)
         (home_uuids if p.team_id == home.id else away_uuids).append(sporty_player_id)
         draftable.append({"name": p.name, "real_team": team_name.get(p.team_id, ""),
                           "sporty_player_id": sporty_player_id})
     db.commit()
 
-    # Push the per-team starting lineups so the match page can show who's playing.
+    # Push the per-team squads (starters + bench) so the match page can show
+    # who's playing and who waits on the bench.
     try:
         await client.push_lineups({
             "sporty_match_id": sporty_match_id,
             "home": home_uuids,
             "away": away_uuids,
+            "home_bench": home_bench_uuids,
+            "away_bench": away_bench_uuids,
         })
     except Exception as exc:  # best-effort; never block the launch
         logger.warning("lineups push failed: %s", exc)

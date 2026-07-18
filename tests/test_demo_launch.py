@@ -16,6 +16,7 @@ class FakeBackend:
         self.resolved = []
         self.demo_setups = []
         self.match_results = []
+        self.lineups = []
         # resolve_existing only matches players whose name is in this set.
         self.resolvable = resolvable
 
@@ -52,6 +53,10 @@ class FakeBackend:
         self.match_results.append(payload)
         return True
 
+    async def push_lineups(self, payload):
+        self.lineups.append(payload)
+        return True
+
     async def push_player_ratings(self, payload):
         return True
 
@@ -59,12 +64,12 @@ class FakeBackend:
         return True
 
 
-def _make_world(client):
+def _make_world(client, players_per_team=3):
     sport_id = client.post("/sports", json={"name": "football"}).json()["id"]
     home = client.post("/teams", json={"name": "Linkpool", "sport_id": sport_id}).json()["id"]
     away = client.post("/teams", json={"name": "Linksenal", "sport_id": sport_id}).json()["id"]
     for team_id, prefix in ((home, "H"), (away, "A")):
-        for i in range(3):
+        for i in range(players_per_team):
             client.post("/players", json={
                 "name": f"{prefix} Player {i}", "team_id": team_id, "position": "M", "sport_id": sport_id,
             })
@@ -99,6 +104,29 @@ def test_demo_launch_schedules_links_and_simulates(client, wait_for_simulation, 
     assert final["status"] == "finished"
     assert fake.match_results
     assert fake.match_results[0]["sporty_match_id"] == FakeBackend.MATCH_UUID
+
+
+def test_demo_launch_pushes_starters_and_bench_separately(client, monkeypatch):
+    """The lineups push carries the starting XI and the bench as distinct
+    groups so the match page can render both."""
+    fake = FakeBackend()
+    monkeypatch.setattr(demo_router, "get_backend_client", lambda: fake)
+
+    # 13 per team = 11 starters + 2 bench (football lineup size).
+    match_id = _make_world(client, players_per_team=13)
+    resp = client.post("/demo/launch", json={
+        "match_id": match_id, "simulate": False, "fantasy_demo": False,
+    })
+    assert resp.status_code == 200
+
+    assert fake.lineups, "demo launch must push lineups"
+    push = fake.lineups[0]
+    assert push["sporty_match_id"] == FakeBackend.MATCH_UUID
+    assert len(push["home"]) == 11 and len(push["away"]) == 11
+    assert len(push["home_bench"]) == 2 and len(push["away_bench"]) == 2
+    # Starters and bench never overlap.
+    assert not set(push["home"]) & set(push["home_bench"])
+    assert not set(push["away"]) & set(push["away_bench"])
 
 
 def test_demo_prepare_mode_registers_without_simulating(client, monkeypatch):
