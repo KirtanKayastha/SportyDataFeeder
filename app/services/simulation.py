@@ -565,11 +565,25 @@ def _swap_players(setup: dict, player_off, player_on) -> None:
     setup["lineups"].append(player_on)
 
 
+def _pick_replacement(bench: list, off_is_keeper: bool):
+    """Position-aware incoming pick shared by tactical and injury subs: a
+    keeper coming off prefers a bench keeper (falling back to any bench player
+    — playing without a keeper is worse); an outfielder coming off only ever
+    gets an outfield replacement. Returns None when the bench holds no valid
+    replacement, i.e. a spare keeper never enters for an outfielder."""
+    if off_is_keeper:
+        pool = [p for p in bench if _is_keeper(p)] or bench
+    else:
+        pool = [p for p in bench if not _is_keeper(p)]
+    return pool[int(numpy.random.randint(len(pool)))] if pool else None
+
+
 def _football_substitutions(setup: dict, dynamics: dict, minute: int) -> list[dict]:
     """Execute this minute's planned subs (max 5/team). The player coming off is
     a random outfielder — never the keeper, never a featured (demo) player, and
-    never someone already sent off; the replacement comes from the bench and
-    does NOT return (football subs are permanent)."""
+    never someone already sent off; the replacement is a bench OUTFIELDER (a
+    spare keeper only enters for a keeper) and does NOT return (football subs
+    are permanent)."""
     events: list[dict] = []
     for team_id, team in dynamics["teams"].items():
         while team["sub_minutes"] and team["sub_minutes"][0] <= minute:
@@ -590,7 +604,11 @@ def _football_substitutions(setup: dict, dynamics: dict, minute: int) -> list[di
             knocked = [p for p in eligible if p.id in dynamics["knocked"]]
             pool = knocked or eligible
             player_off = pool[int(numpy.random.randint(len(pool)))]
-            player_on = team["bench"].pop(int(numpy.random.randint(len(team["bench"]))))
+            player_on = _pick_replacement(team["bench"], _is_keeper(player_off))
+            if player_on is None:
+                # Only a spare keeper left on the bench — the window goes unused.
+                continue
+            team["bench"].remove(player_on)
             team["subs_left"] -= 1
             _swap_players(setup, player_off, player_on)
             events.append(_make_event(
@@ -649,20 +667,24 @@ def _injury_events(setup: dict, dynamics: dict, minute: int) -> list[dict]:
             dynamics["knocked"].add(player.id)
             continue
         team = dynamics["teams"][player.team_id]
-        if team["bench"] and team["subs_left"] > 0:
-            bench = team["bench"]
-            keepers = [p for p in bench if _is_keeper(p)] if _is_keeper(player) else []
-            player_on = keepers[0] if keepers else bench[int(numpy.random.randint(len(bench)))]
-            bench.remove(player_on)
-            team["subs_left"] -= 1
-            _swap_players(setup, player, player_on)
-            events.append(_make_event(
-                "substitution", player_on, minute,
-                extra={"player_out": player.id, "player_out_name": player.name, "reason": "injury"},
-                related_player_id=player.id,
-            ))
-        else:
+        player_on = (
+            _pick_replacement(team["bench"], _is_keeper(player))
+            if team["bench"] and team["subs_left"] > 0
+            else None
+        )
+        if player_on is None:
+            # No window left, or no position-appropriate replacement (an
+            # outfielder never makes way for a spare keeper): play short.
             setup["lineups"].remove(player)
+            continue
+        team["bench"].remove(player_on)
+        team["subs_left"] -= 1
+        _swap_players(setup, player, player_on)
+        events.append(_make_event(
+            "substitution", player_on, minute,
+            extra={"player_out": player.id, "player_out_name": player.name, "reason": "injury"},
+            related_player_id=player.id,
+        ))
     return events
 
 

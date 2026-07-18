@@ -114,6 +114,58 @@ def test_football_substitutions_swap_active_players(client, football_world, wait
                 if e.minute >= sub.minute and e.player_id == sub.player_id and e.event_type == "goal"]
 
 
+def test_pick_replacement_position_rules():
+    """Keepers only replace keepers; outfielders only outfielders — except a
+    keeper going off with no bench keeper still gets a body on the pitch."""
+    from types import SimpleNamespace
+
+    gk = SimpleNamespace(position="G")
+    mid = SimpleNamespace(position="M")
+    assert simulation_service._pick_replacement([gk], off_is_keeper=False) is None
+    assert simulation_service._pick_replacement([gk, mid], off_is_keeper=False) is mid
+    assert simulation_service._pick_replacement([gk, mid], off_is_keeper=True) is gk
+    assert simulation_service._pick_replacement([mid], off_is_keeper=True) is mid
+
+
+def test_bench_keeper_never_subbed_on_for_outfielder(client, football_world, wait_for_simulation, monkeypatch):
+    """With a spare keeper on every bench, tactical windows only ever bring on
+    outfielders; the keeper-only window goes unused (2 subs/team, not 3)."""
+    # Re-position the last rostered player of each team (bench, highest id)
+    # as a second keeper.
+    db = Session()
+    try:
+        from app.database import Player
+        bench_keepers = set()
+        for pids in football_world["players"].values():
+            keeper = db.query(Player).filter_by(id=pids[-1]).first()
+            keeper.position = "G"
+            bench_keepers.add(keeper.id)
+        db.commit()
+    finally:
+        db.close()
+
+    match_id = make_match(client, football_world)
+    client.app.state.event_rates = {
+        pid: {"goal": 1.0}
+        for pids in football_world["players"].values() for pid in pids
+    }
+    monkeypatch.setattr(simulation_service, "_draw_sub_minutes", lambda n, total: [46, 60, 75][:n])
+    monkeypatch.setattr(simulation_service, "TOTAL_MINUTES",
+                        {**simulation_service.TOTAL_MINUTES, simulation_service.SportType.FOOTBALL: 80})
+    monkeypatch.setattr(simulation_service, "_draw_injuries", lambda total: [])
+    monkeypatch.setattr(simulation_service, "_draw_penalty_minutes", lambda total: [])
+
+    client.post("/simulate", json={"match_id": match_id})
+    final = wait_for_simulation(client, match_id)
+    assert final["status"] == "finished"
+
+    subs = [e for e in all_events(match_id) if e.event_type == "substitution"]
+    assert not [s for s in subs if s.player_id in bench_keepers], \
+        "a spare keeper must never come on for an outfielder"
+    # 3 windows but only 2 outfielders per bench: the last window is skipped.
+    assert len(subs) == 4
+
+
 def test_basketball_rotation_gives_bench_court_time(client, wait_for_simulation):
     """Rotation checkpoints cycle the 5+3 pool: bench players get on court (and
     score), substitution events exist in both directions."""
