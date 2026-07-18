@@ -23,6 +23,7 @@ or hosting config is present in this repository). Anything below about "producti
 | [`API.md`](API.md) | Every HTTP endpoint: method, request/response shape, validation, auth, error codes |
 | [`MODELS.md`](MODELS.md) | Every ML/statistical model: Elo, Dixon-Coles, event-rate tables, rule-based raters, evaluation metrics |
 | [`SIMULATION.md`](SIMULATION.md) | Full simulation-engine deep dive: minute loop, event sampling, substitutions, discipline, overtime |
+| [`HOW_A_RESULT_IS_PRODUCED.md`](HOW_A_RESULT_IS_PRODUCED.md) | Teach-ready explainer with worked numbers: historical data → per-player rates → calibration → Bernoulli minute loop → result |
 | [`CONFIGURATION_DEPLOYMENT.md`](CONFIGURATION_DEPLOYMENT.md) | Every environment variable, Docker, health checks, logging, security posture |
 | [`IMPROVEMENTS.md`](IMPROVEMENTS.md) | Concrete, code-referenced improvement opportunities |
 
