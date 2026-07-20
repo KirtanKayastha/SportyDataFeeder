@@ -8,3 +8,4 @@ __pycache__/
 nba.sqlite
 models_pkl/
 legacy_database.py.bak
+.env.example
