@@ -1075,7 +1075,16 @@ async def run_simulation(
         match.status = "finished"
         db.commit()
 
-        ratings = rate_players(events_by_player, state.sport_type)
+        # Rate every player who took the pitch/court (minutes > 0), not just
+        # those who had events — a player who played without recording an event
+        # still earns the base rating rather than being omitted. Seed the event
+        # map with an empty list for each played-but-eventless player so
+        # rate_players covers them (base 6.0), then rate the union.
+        events_for_rating: dict[int, list[str]] = dict(events_by_player)
+        for player_id, minutes in dynamics["minutes"].items():
+            if minutes > 0:
+                events_for_rating.setdefault(player_id, [])
+        ratings = rate_players(events_for_rating, state.sport_type)
         man_of_match = find_man_of_match(ratings)
         if ratings:
             _store_ratings(db, state.match_id, ratings, man_of_match)
